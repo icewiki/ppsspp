@@ -55,12 +55,12 @@ enum DoLightComputation {
 	LIGHT_FULL,
 };
 
-void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage lang) {
+void GenerateVertexShaderHLSL(const VShaderID &id, char *buffer, ShaderLanguage lang) {
 	char *p = buffer;
 	const u32 vertType = gstate.vertType;
 
 	bool isModeThrough = id.Bit(VS_BIT_IS_THROUGH);
-	bool lmode = id.Bit(VS_BIT_LMODE) && !isModeThrough;  // TODO: Different expression than in shaderIDgen
+	bool lmode = id.Bit(VS_BIT_LMODE);
 	bool doTexture = id.Bit(VS_BIT_DO_TEXTURE);
 	bool doTextureTransform = id.Bit(VS_BIT_DO_TEXTURE_TRANSFORM);
 
@@ -89,8 +89,6 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 	bool hasColorTess = id.Bit(VS_BIT_HAS_COLOR_TESS);
 	bool hasTexcoordTess = id.Bit(VS_BIT_HAS_TEXCOORD_TESS);
 	bool flipNormalTess = id.Bit(VS_BIT_NORM_REVERSE_TESS);
-
-	bool scaleUV = !throughmode && (uvGenMode == GE_TEXMAP_TEXTURE_COORDS || uvGenMode == GE_TEXMAP_UNKNOWN);
 
 	DoLightComputation doLight[4] = { LIGHT_OFF, LIGHT_OFF, LIGHT_OFF, LIGHT_OFF };
 	if (useHWTransform) {
@@ -157,8 +155,7 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 
 					if (type == GE_LIGHTTYPE_SPOT || type == GE_LIGHTTYPE_UNKNOWN) {
 						WRITE(p, "float3 u_lightdir%i : register(c%i);\n", i, CONST_VS_LIGHTDIR + i);
-						WRITE(p, "float4 u_lightangle%i : register(c%i);\n", i, CONST_VS_LIGHTANGLE + i);
-						WRITE(p, "float4 u_lightspotCoef%i : register(c%i);\n", i, CONST_VS_LIGHTSPOTCOEF + i);
+						WRITE(p, "float4 u_lightangle_spotCoef%i : register(c%i);\n", i, CONST_VS_LIGHTANGLE_SPOTCOEF + i);
 					}
 					WRITE(p, "float3 u_lightambient%i : register(c%i);\n", i, CONST_VS_LIGHTAMBIENT + i);
 					WRITE(p, "float3 u_lightdiffuse%i : register(c%i);\n", i, CONST_VS_LIGHTDIFFUSE + i);
@@ -234,7 +231,8 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 	if (doTexture) {
 		WRITE(p, "  float3 v_texcoord : TEXCOORD0;\n");
 	}
-	WRITE(p, "  float4 v_color0    : COLOR0;\n");
+	const char *colorInterpolation = doFlatShading && lang == HLSL_D3D11 ? "nointerpolation " : "";
+	WRITE(p, "  %sfloat4 v_color0    : COLOR0;\n", colorInterpolation);
 	if (lmode)
 		WRITE(p, "  float3 v_color1    : COLOR1;\n");
 
@@ -265,9 +263,12 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 	// Hardware tessellation
 	if (doSpline || doBezier) {
 		if (lang == HLSL_D3D11 || lang == HLSL_D3D11_LEVEL9) {
-			WRITE(p, "Texture1D<float3> u_tess_pos_tex : register(t0);\n");
-			WRITE(p, "Texture1D<float3> u_tess_tex_tex : register(t1);\n");
-			WRITE(p, "Texture1D<float4> u_tess_col_tex : register(t2);\n");
+			WRITE(p, "struct TessData {\n");
+			WRITE(p, "  float3 pos; float pad1;\n");
+			WRITE(p, "  float2 tex; float2 pad2;\n");
+			WRITE(p, "  float4 col;\n");
+			WRITE(p, "};");
+			WRITE(p, "StructuredBuffer<TessData> tess_data : register(t0);\n");
 		}
 
 		const char *init[3] = { "0.0, 0.0", "0.0, 0.0, 0.0", "0.0, 0.0, 0.0, 0.0" };
@@ -393,6 +394,8 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 		if (!enableBones) {
 			// Hardware tessellation
 			if (doSpline || doBezier) {
+				WRITE(p, "  uint u_spline_count_u = u_spline_counts & 0xFF;\n");
+				WRITE(p, "  uint u_spline_count_v = (u_spline_counts >> 8) & 0xFF;\n");
 				WRITE(p, "  uint num_patches_u = %s;\n", doBezier ? "(u_spline_count_u - 1) / 3u" : "u_spline_count_u - 3");
 				WRITE(p, "  float2 tess_pos = In.position.xy;\n");
 				WRITE(p, "  int u = In.instanceId %% num_patches_u;\n");
@@ -401,17 +404,15 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 				WRITE(p, "  float3 _pos[16];\n");
 				WRITE(p, "  float2 _tex[16];\n");
 				WRITE(p, "  float4 _col[16];\n");
-				WRITE(p, "  int idx;\n");
-				WRITE(p, "  int2 index;\n");
+				WRITE(p, "  int index;\n");
 				for (int i = 0; i < 4; i++) {
 					for (int j = 0; j < 4; j++) {
-						WRITE(p, "  idx = (%i + v%s) * u_spline_count_u + (%i + u%s);\n", i, doBezier ? " * 3" : "", j, doBezier ? " * 3" : "");
-						WRITE(p, "  index = int2(idx, 0);\n");
-						WRITE(p, "  _pos[%i] = u_tess_pos_tex.Load(index).xyz;\n", i * 4 + j);
+						WRITE(p, "  index = (%i + v%s) * u_spline_count_u + (%i + u%s);\n", i, doBezier ? " * 3" : "", j, doBezier ? " * 3" : "");
+						WRITE(p, "  _pos[%i] = tess_data[index].pos;\n", i * 4 + j);
 						if (doTexture && hasTexcoord && hasTexcoordTess)
-							WRITE(p, "  _tex[%i] = u_tess_tex_tex.Load(index).xy;\n", i * 4 + j);
+							WRITE(p, "  _tex[%i] = tess_data[index].tex;\n", i * 4 + j);
 						if (hasColor && hasColorTess)
-							WRITE(p, "  _col[%i] = u_tess_col_tex.Load(index).rgba;\n", i * 4 + j);
+							WRITE(p, "  _col[%i] = tess_data[index].col;\n", i * 4 + j);
 					}
 				}
 				WRITE(p, "  float2 weights[4];\n");
@@ -423,6 +424,8 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 					WRITE(p, "  weights[3] = tess_pos * tess_pos * tess_pos;\n");
 				} else if (doSpline) {
 					WRITE(p, "  int2 spline_num_patches = int2(u_spline_count_u - 3, u_spline_count_v - 3);\n");
+					WRITE(p, "  int u_spline_type_u = (u_spline_counts >> 16) & 0xFF;\n");
+					WRITE(p, "  int u_spline_type_v = (u_spline_counts >> 24) & 0xFF;\n");
 					WRITE(p, "  int2 spline_type = int2(u_spline_type_u, u_spline_type_v);\n");
 					WRITE(p, "  float2 knots[6];\n");
 					WRITE(p, "  spline_knot(spline_num_patches, spline_type, knots, patch_pos);\n");
@@ -439,7 +442,7 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 					if (hasColorTess)
 						WRITE(p, "  float4 col = tess_sample(_col, weights);\n");
 					else
-						WRITE(p, "  float4 col = u_tess_col_tex.Load(int2(0, 0)).rgba;\n");
+						WRITE(p, "  float4 col = tess_data[0].col;\n");
 				}
 				if (hasNormal) {
 					// Curved surface is probably always need to compute normal(not sampling from control points)
@@ -672,8 +675,8 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 			case GE_LIGHTTYPE_SPOT:
 			case GE_LIGHTTYPE_UNKNOWN:
 				WRITE(p, "  float angle%i = dot(normalize(u_lightdir%i), toLight);\n", i, i);
-				WRITE(p, "  if (angle%i >= u_lightangle%i.x) {\n", i, i);
-				WRITE(p, "    lightScale = clamp(1.0 / dot(u_lightatt%i, float3(1.0, distance, distance*distance)), 0.0, 1.0) * pow(angle%i, u_lightspotCoef%i.x);\n", i, i, i);
+				WRITE(p, "  if (angle%i >= u_lightangle_spotCoef%i.x) {\n", i, i);
+				WRITE(p, "    lightScale = clamp(1.0 / dot(u_lightatt%i, float3(1.0, distance, distance*distance)), 0.0, 1.0) * pow(angle%i, u_lightangle_spotCoef%i.y);\n", i, i, i);
 				WRITE(p, "  } else {\n");
 				WRITE(p, "    lightScale = 0.0;\n");
 				WRITE(p, "  }\n");
@@ -722,6 +725,9 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 			if (lmode)
 				WRITE(p, "  Out.v_color1 = float3(0, 0, 0);\n");
 		}
+
+		bool scaleUV = !throughmode && (uvGenMode == GE_TEXMAP_TEXTURE_COORDS || uvGenMode == GE_TEXMAP_UNKNOWN);
+
 
 		// Step 3: UV generation
 		if (doTexture) {
@@ -795,11 +801,7 @@ void GenerateVertexShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage l
 
 		// Compute fogdepth
 		if (enableFog) {
-			if (lang == HLSL_D3D11 || lang == HLSL_D3D11_LEVEL9) {
-				WRITE(p, "  Out.v_fogdepth = (viewPos.z + u_fogcoef_stencilreplace.x) * u_fogcoef_stencilreplace.y;\n");
-			} else {
-				WRITE(p, "  Out.v_fogdepth = (viewPos.z + u_fogcoef.x) * u_fogcoef.y;\n");
-			}
+			WRITE(p, "  Out.v_fogdepth = (viewPos.z + u_fogcoef.x) * u_fogcoef.y;\n");
 		}
 	}
 

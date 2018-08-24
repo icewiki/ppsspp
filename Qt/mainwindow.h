@@ -1,5 +1,7 @@
-#ifndef MAINWINDOW_H
-#define MAINWINDOW_H
+#pragma once
+
+#include <queue>
+#include <mutex>
 
 #include <QtCore>
 #include <QMenuBar>
@@ -10,33 +12,41 @@
 #include "Core/Core.h"
 #include "Core/Config.h"
 #include "Core/System.h"
-#include "Debugger/debugger_disasm.h"
-#include "Debugger/debugger_memory.h"
-#include "Debugger/debugger_memorytex.h"
-#include "Debugger/debugger_displaylist.h"
-#include "base/QtMain.h"
+#include "Qt/QtMain.h"
 
 extern bool g_TakeScreenshot;
 
 class MenuAction;
 class MenuTree;
 
+// hacky, should probably use qt signals or something, but whatever..
+enum class MainWindowMsg {
+	BOOT_DONE,
+	WINDOW_TITLE_CHANGED,
+};
+
 class MainWindow : public QMainWindow
 {
 	Q_OBJECT
 
 public:
-	explicit MainWindow(QWidget *parent = 0, bool fullscreen=false);
+	explicit MainWindow(QWidget *parent = nullptr, bool fullscreen = false);
 	~MainWindow() { };
 
-	Debugger_Disasm* GetDialogDisasm() { return dialogDisasm; }
-	Debugger_Memory* GetDialogMemory() { return memoryWindow; }
-	Debugger_MemoryTex* GetDialogMemoryTex() { return memoryTexWindow; }
-	Debugger_DisplayList* GetDialogDisplaylist() { return displaylistWindow; }
 	CoreState GetNextState() { return nextState; }
 
-	void ShowMemory(u32 addr);
 	void updateMenus();
+
+	void Notify(MainWindowMsg msg) {
+		std::unique_lock<std::mutex> lock(msgMutex_);
+		msgQueue_.push(msg);
+	}
+
+	void SetWindowTitleAsync(std::string title) {
+		std::unique_lock<std::mutex> lock(titleMutex_);
+		newWindowTitle_ = title;
+		Notify(MainWindowMsg::WINDOW_TITLE_CHANGED);
+	}
 
 protected:
 	void changeEvent(QEvent *e)
@@ -54,7 +64,6 @@ signals:
 	void updateMenu();
 
 public slots:
-	void Boot();
 	void newFrame();
 
 private slots:
@@ -79,11 +88,7 @@ private slots:
 	void resetTableAct();
 	void dumpNextAct();
 	void takeScreen() { g_TakeScreenshot = true; }
-	void disasmAct();
-	void dpyListAct();
 	void consoleAct();
-	void memviewAct();
-	void memviewTexAct();
 
 	// Options
 	// Core
@@ -94,12 +99,18 @@ private slots:
 	// Video
 	void anisotropicGroup_triggered(QAction *action) { g_Config.iAnisotropyLevel = action->data().toInt(); }
 
-	void bufferRenderAct() { g_Config.iRenderingMode = !g_Config.iRenderingMode; }
+	void bufferRenderAct() {
+		g_Config.iRenderingMode = !g_Config.iRenderingMode;
+		NativeMessageReceived("gpu_resized", "");
+	}
 	void linearAct() { g_Config.iTexFiltering = (g_Config.iTexFiltering != 0) ? 0 : 3; }
 
 	void screenGroup_triggered(QAction *action) { SetWindowScale(action->data().toInt()); }
 
-	void displayLayoutGroup_triggered(QAction *action) { g_Config.iSmallDisplayZoomType = action->data().toInt(); }
+	void displayLayoutGroup_triggered(QAction *action) {
+		g_Config.iSmallDisplayZoomType = action->data().toInt();
+		NativeMessageReceived("gpu_resized", "");
+	}
 	void transformAct() { g_Config.bHardwareTransform = !g_Config.bHardwareTransform; }
 	void vertexCacheAct() { g_Config.bVertexCache = !g_Config.bVertexCache; }
 	void frameskipAct() { g_Config.iFrameSkip = !g_Config.iFrameSkip; }
@@ -109,7 +120,10 @@ private slots:
 
 	void fullscrAct();
 	void raiseTopMost();
-	void statsAct() { g_Config.bShowDebugStats = !g_Config.bShowDebugStats; }
+	void statsAct() {
+		g_Config.bShowDebugStats = !g_Config.bShowDebugStats;
+		NativeMessageReceived("clear jit", "");
+	}
 	void showFPSAct() { g_Config.iShowFPSCounter = !g_Config.iShowFPSCounter; }
 
 	// Logs
@@ -136,11 +150,12 @@ private slots:
 	void langChanged(QAction *action) { loadLanguage(action->data().toString(), true); }
 
 private:
+	void bootDone();
 	void SetWindowScale(int zoom);
 	void SetGameTitle(QString text);
+	void SetFullScreen(bool fullscreen);
 	void loadLanguage(const QString &language, bool retranslate);
 	void createMenus();
-	void notifyMapsLoaded();
 
 	QTranslator translator;
 	QString currentLanguage;
@@ -148,13 +163,14 @@ private:
 	CoreState nextState;
 	GlobalUIState lastUIState;
 
-	Debugger_Disasm *dialogDisasm;
-	Debugger_Memory *memoryWindow;
-	Debugger_MemoryTex *memoryTexWindow;
-	Debugger_DisplayList *displaylistWindow;
-
 	QActionGroup *anisotropicGroup, *screenGroup, *displayLayoutGroup,
 	             *defaultLogGroup, *g3dLogGroup, *hleLogGroup;
+
+	std::queue<MainWindowMsg> msgQueue_;
+	std::mutex msgMutex_;
+
+	std::string newWindowTitle_;
+	std::mutex titleMutex_;
 };
 
 class MenuAction : public QAction
@@ -275,5 +291,3 @@ public slots:
 private:
 	const char *_text;
 };
-
-#endif // MAINWINDOW_H

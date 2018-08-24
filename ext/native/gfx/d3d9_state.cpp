@@ -1,4 +1,4 @@
-#ifdef _MSC_VER
+#ifdef _WIN32
 
 #include "d3d9_state.h"
 #include <assert.h>
@@ -35,6 +35,7 @@ void DirectXState::Restore() {
 	scissorRect.restore(); count++;
 
 	cullMode.restore(); count++;
+	shadeMode.restore(); count++;
 
 	depthTest.restore(); count++;
 	depthFunc.restore(); count++;

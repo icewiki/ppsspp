@@ -74,9 +74,6 @@
     <ClInclude Include="base\basictypes.h">
       <Filter>base</Filter>
     </ClInclude>
-    <ClInclude Include="gfx\gl_lost_manager.h">
-      <Filter>gfx</Filter>
-    </ClInclude>
     <ClInclude Include="gfx\texture_atlas.h">
       <Filter>gfx</Filter>
     </ClInclude>
@@ -245,12 +242,6 @@
     <ClInclude Include="ext\jpge\jpge.h">
       <Filter>ext\jpge</Filter>
     </ClInclude>
-    <ClInclude Include="ext\vjson\block_allocator.h">
-      <Filter>ext\vjson</Filter>
-    </ClInclude>
-    <ClInclude Include="ext\vjson\json.h">
-      <Filter>ext\vjson</Filter>
-    </ClInclude>
     <ClInclude Include="gfx_es2\gl3stub.h">
       <Filter>gfx</Filter>
     </ClInclude>
@@ -305,9 +296,6 @@
     <ClInclude Include="gfx\d3d9_state.h">
       <Filter>gfx</Filter>
     </ClInclude>
-    <ClInclude Include="gfx\GLStateCache.h">
-      <Filter>gfx</Filter>
-    </ClInclude>
     <ClInclude Include="thin3d\d3d11_loader.h">
       <Filter>thin3d</Filter>
     </ClInclude>
@@ -319,6 +307,45 @@
     </ClInclude>
     <ClInclude Include="gfx_es2\draw_text_android.h">
       <Filter>gfx</Filter>
+    </ClInclude>
+    <ClInclude Include="thin3d\VulkanQueueRunner.h">
+      <Filter>thin3d</Filter>
+    </ClInclude>
+    <ClInclude Include="thin3d\VulkanRenderManager.h">
+      <Filter>thin3d</Filter>
+    </ClInclude>
+    <ClInclude Include="thin3d\DataFormat.h">
+      <Filter>thin3d</Filter>
+    </ClInclude>
+    <ClInclude Include="ui\ui_tween.h">
+      <Filter>ui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Qt\QtMain.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="thin3d\GLRenderManager.h">
+      <Filter>thin3d</Filter>
+    </ClInclude>
+    <ClInclude Include="thin3d\GLQueueRunner.h">
+      <Filter>thin3d</Filter>
+    </ClInclude>
+    <ClInclude Include="thin3d\DataFormatGL.h">
+      <Filter>thin3d</Filter>
+    </ClInclude>
+    <ClInclude Include="thin3d\thin3d_create.h">
+      <Filter>thin3d</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\gason\gason.h">
+      <Filter>ext\gason</Filter>
+    </ClInclude>
+    <ClInclude Include="json\json_reader.h">
+      <Filter>json</Filter>
+    </ClInclude>
+    <ClInclude Include="net\websocket_server.h">
+      <Filter>net</Filter>
+    </ClInclude>
+    <ClInclude Include="data\base64.h">
+      <Filter>data</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -357,9 +384,6 @@
     </ClCompile>
     <ClCompile Include="file\zip_read.cpp">
       <Filter>file</Filter>
-    </ClCompile>
-    <ClCompile Include="gfx\gl_lost_manager.cpp">
-      <Filter>gfx</Filter>
     </ClCompile>
     <ClCompile Include="gfx\texture_atlas.cpp">
       <Filter>gfx</Filter>
@@ -694,12 +718,6 @@
     <ClCompile Include="ext\jpge\jpge.cpp">
       <Filter>ext\jpge</Filter>
     </ClCompile>
-    <ClCompile Include="ext\vjson\block_allocator.cpp">
-      <Filter>ext\vjson</Filter>
-    </ClCompile>
-    <ClCompile Include="ext\vjson\json.cpp">
-      <Filter>ext\vjson</Filter>
-    </ClCompile>
     <ClCompile Include="gfx_es2\gl3stub.c">
       <Filter>gfx</Filter>
     </ClCompile>
@@ -733,10 +751,10 @@
     <ClCompile Include="thread\executor.cpp">
       <Filter>thread</Filter>
     </ClCompile>
-    <ClCompile Include="base\PCMain.cpp">
+    <ClCompile Include="..\..\SDL\SDLMain.cpp">
       <Filter>base</Filter>
     </ClCompile>
-    <ClCompile Include="base\QtMain.cpp">
+    <ClCompile Include="..\..\Qt\QtMain.cpp">
       <Filter>base</Filter>
     </ClCompile>
     <ClCompile Include="file\free.cpp">
@@ -760,9 +778,6 @@
     <ClCompile Include="gfx\d3d9_state.cpp">
       <Filter>gfx</Filter>
     </ClCompile>
-    <ClCompile Include="gfx\GLStateCache.cpp">
-      <Filter>gfx</Filter>
-    </ClCompile>
     <ClCompile Include="thin3d\d3d11_loader.cpp">
       <Filter>thin3d</Filter>
     </ClCompile>
@@ -780,6 +795,36 @@
     </ClCompile>
     <ClCompile Include="math\dataconv.cpp">
       <Filter>math</Filter>
+    </ClCompile>
+    <ClCompile Include="thin3d\VulkanQueueRunner.cpp">
+      <Filter>thin3d</Filter>
+    </ClCompile>
+    <ClCompile Include="thin3d\VulkanRenderManager.cpp">
+      <Filter>thin3d</Filter>
+    </ClCompile>
+    <ClCompile Include="ui\ui_tween.cpp">
+      <Filter>ui</Filter>
+    </ClCompile>
+    <ClCompile Include="thin3d\GLQueueRunner.cpp">
+      <Filter>thin3d</Filter>
+    </ClCompile>
+    <ClCompile Include="thin3d\GLRenderManager.cpp">
+      <Filter>thin3d</Filter>
+    </ClCompile>
+    <ClCompile Include="thin3d\DataFormatGL.cpp">
+      <Filter>thin3d</Filter>
+    </ClCompile>
+    <ClCompile Include="ext\gason\gason.cpp">
+      <Filter>ext\gason</Filter>
+    </ClCompile>
+    <ClCompile Include="json\json_reader.cpp">
+      <Filter>json</Filter>
+    </ClCompile>
+    <ClCompile Include="net\websocket_server.cpp">
+      <Filter>net</Filter>
+    </ClCompile>
+    <ClCompile Include="data\base64.cpp">
+      <Filter>data</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -843,14 +888,14 @@
     <Filter Include="ext\jpge">
       <UniqueIdentifier>{3721adbc-1a4a-4017-bc1d-893c7e86bc22}</UniqueIdentifier>
     </Filter>
-    <Filter Include="ext\vjson">
-      <UniqueIdentifier>{c6910d82-73d3-4d97-ac9c-bcc03265b1bc}</UniqueIdentifier>
-    </Filter>
     <Filter Include="math\fast">
       <UniqueIdentifier>{5ce64c0e-98e4-4411-86cc-aacaf2f60b21}</UniqueIdentifier>
     </Filter>
     <Filter Include="thin3d">
       <UniqueIdentifier>{06c6305a-a646-485b-85b9-645a24dd6553}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ext\gason">
+      <UniqueIdentifier>{5b740c6f-8dbc-4529-9114-6564b37b3548}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

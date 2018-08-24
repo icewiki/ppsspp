@@ -42,9 +42,8 @@
 #include <stdlib.h>
 #endif
 
-#if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+#if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__)
 #include <sys/sysctl.h>		// KERN_PROC_PATHNAME
-#include <unistd.h>		// getpid
 #endif
 
 #if defined(__APPLE__)
@@ -101,6 +100,65 @@ bool OpenCPPFile(std::fstream & stream, const std::string &filename, std::ios::o
 	return stream.is_open();
 }
 
+std::string ResolvePath(const std::string &path) {
+#ifdef _WIN32
+	typedef DWORD (WINAPI *getFinalPathNameByHandleW_f)(HANDLE hFile, LPWSTR lpszFilePath, DWORD cchFilePath, DWORD dwFlags);
+	static getFinalPathNameByHandleW_f getFinalPathNameByHandleW = nullptr;
+
+	if (!getFinalPathNameByHandleW) {
+		// We leak this, but that's okay since the process should hold onto this DLL for the entire lifetime anyway.
+		HMODULE kernel32 = LoadLibraryW(L"kernel32.dll");
+		getFinalPathNameByHandleW = (getFinalPathNameByHandleW_f)GetProcAddress(kernel32, "GetFinalPathNameByHandleW");
+	}
+
+	static const int BUF_SIZE = 32768;
+	wchar_t *buf = new wchar_t[BUF_SIZE];
+	memset(buf, 0, BUF_SIZE);
+
+	std::wstring input = ConvertUTF8ToWString(path);
+	if (getFinalPathNameByHandleW) {
+		HANDLE hFile = CreateFile(input.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+		if (hFile == INVALID_HANDLE_VALUE) {
+			wcscpy_s(buf, BUF_SIZE - 1, input.c_str());
+		} else {
+			int result = getFinalPathNameByHandleW(hFile, buf, BUF_SIZE - 1, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+			if (result >= BUF_SIZE || result == 0)
+				wcscpy_s(buf, BUF_SIZE - 1, input.c_str());
+		}
+	} else {
+		wchar_t *longBuf = new wchar_t[BUF_SIZE];
+		memset(buf, 0, BUF_SIZE);
+
+		int result = GetLongPathNameW(input.c_str(), longBuf, BUF_SIZE - 1);
+		if (result >= BUF_SIZE || result == 0)
+			wcscpy_s(longBuf, BUF_SIZE - 1, input.c_str());
+
+		result = GetFullPathNameW(longBuf, BUF_SIZE - 1, buf, nullptr);
+		if (result >= BUF_SIZE || result == 0)
+			wcscpy_s(buf, BUF_SIZE - 1, input.c_str());
+
+		delete [] longBuf;
+
+		// Normalize slashes just in case.
+		for (int i = 0; i < BUF_SIZE; ++i) {
+			if (buf[i] == '\\')
+				buf[i] = '/';
+		}
+	}
+
+	// Undo the \\?\C:\ syntax that's normally returned.
+	std::string output = ConvertWStringToUTF8(buf);
+	if (buf[0] == '\\' && buf[1] == '\\' && buf[2] == '?' && buf[3] == '\\' && isalpha(buf[4]) && buf[5] == ':')
+		output = output.substr(4);
+	delete [] buf;
+	return output;
+#else
+	char buf[PATH_MAX + 1];
+	if (realpath(path.c_str(), buf) == nullptr)
+		return path;
+	return buf;
+#endif
+}
 
 // Remove any ending forward slashes from directory paths
 // Modifies argument.
@@ -209,7 +267,7 @@ bool Delete(const std::string &filename) {
 // Returns true if successful, or path already exists.
 bool CreateDir(const std::string &path)
 {
-	INFO_LOG(COMMON, "CreateDir: directory %s", path.c_str());
+	DEBUG_LOG(COMMON, "CreateDir('%s')", path.c_str());
 #ifdef _WIN32
 	if (::CreateDirectory(ConvertUTF8ToWString(path).c_str(), NULL))
 		return true;
@@ -242,10 +300,9 @@ bool CreateDir(const std::string &path)
 bool CreateFullPath(const std::string &fullPath)
 {
 	int panicCounter = 100;
-	DEBUG_LOG(COMMON, "CreateFullPath: path %s", fullPath.c_str());
+	VERBOSE_LOG(COMMON, "CreateFullPath: path %s", fullPath.c_str());
 		
-	if (File::Exists(fullPath))
-	{
+	if (File::Exists(fullPath)) {
 		DEBUG_LOG(COMMON, "CreateFullPath: path exists %s", fullPath.c_str());
 		return true;
 	}
@@ -767,9 +824,15 @@ const std::string &GetExeDirectory()
 #elif defined(KERN_PROC_PATHNAME)
 		int mib[4] = {
 			CTL_KERN,
+#if defined(__NetBSD__)
+			KERN_PROC_ARGS,
+			-1,
+			KERN_PROC_PATHNAME,
+#else
 			KERN_PROC,
 			KERN_PROC_PATHNAME,
-			getpid()
+			-1,
+#endif
 		};
 		size_t sz = program_path_size;
 

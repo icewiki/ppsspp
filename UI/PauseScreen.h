@@ -27,7 +27,7 @@
 
 class GamePauseScreen : public UIDialogScreenWithGameBackground {
 public:
-	GamePauseScreen(const std::string &filename) : UIDialogScreenWithGameBackground(filename), finishNextFrame_(false), gamePath_(filename) {}
+	GamePauseScreen(const std::string &filename) : UIDialogScreenWithGameBackground(filename), gamePath_(filename) {}
 	virtual ~GamePauseScreen();
 
 	virtual void dialogFinished(const Screen *dialog, DialogResult dr) override;
@@ -35,11 +35,9 @@ public:
 protected:
 	virtual void CreateViews() override;
 	virtual void update() override;
-	virtual void sendMessage(const char *message, const char *value) override;
 	void CallbackDeleteConfig(bool yes);
 
 private:
-	UI::EventReturn OnMainSettings(UI::EventParams &e);
 	UI::EventReturn OnGameSettings(UI::EventParams &e);
 	UI::EventReturn OnExitToMenu(UI::EventParams &e);
 	UI::EventReturn OnReportFeedback(UI::EventParams &e);
@@ -55,18 +53,15 @@ private:
 	UI::EventReturn OnSwitchUMD(UI::EventParams &e);
 	UI::EventReturn OnState(UI::EventParams &e);
 
-	UI::Choice *saveStateButton_;
-	UI::Choice *loadStateButton_;
-
 	// hack
-	bool finishNextFrame_;
+	bool finishNextFrame_ = false;
 	std::string gamePath_;
 };
 
 class PrioritizedWorkQueue;
 
-// TextureView takes a texture that is assumed to be alive during the lifetime
-// of the view. TODO: Actually make async using the task.
+// AsyncImageFileView loads a texture from a file, and reloads it as necessary.
+// TODO: Actually make async, doh.
 class AsyncImageFileView : public UI::Clickable {
 public:
 	AsyncImageFileView(const std::string &filename, UI::ImageSizeMode sizeMode, PrioritizedWorkQueue *wq, UI::LayoutParams *layoutParams = 0);
@@ -74,6 +69,9 @@ public:
 
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
 	void Draw(UIContext &dc) override;
+
+	void DeviceLost() override;
+	void DeviceRestored(Draw::DrawContext *draw) override;
 
 	void SetFilename(std::string filename);
 	void SetColor(uint32_t color) { color_ = color; }

@@ -33,7 +33,7 @@ namespace DX9 {
 
 // Missing: Z depth range
 // Also, logic ops etc, of course, as they are not supported in DX9.
-bool GenerateFragmentShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage lang) {
+bool GenerateFragmentShaderHLSL(const FShaderID &id, char *buffer, ShaderLanguage lang) {
 	char *p = buffer;
 
 	bool lmode = id.Bit(FS_BIT_LMODE);
@@ -135,7 +135,8 @@ bool GenerateFragmentShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage
 	if (doTexture) {
 		WRITE(p, "  float3 v_texcoord: TEXCOORD0;\n");
 	}
-	WRITE(p, "  float4 v_color0: COLOR0;\n");
+	const char *colorInterpolation = doFlatShading && lang == HLSL_D3D11 ? "nointerpolation " : "";
+	WRITE(p, "  %sfloat4 v_color0: COLOR0;\n", colorInterpolation);
 	if (lmode) {
 		WRITE(p, "  float3 v_color1: COLOR1;\n");
 	}
@@ -437,7 +438,7 @@ bool GenerateFragmentShaderHLSL(const ShaderID &id, char *buffer, ShaderLanguage
 	if (stencilToAlpha != REPLACE_ALPHA_NO) {
 		switch (replaceAlphaWithStencilType) {
 		case STENCIL_VALUE_UNIFORM:
-			replacedAlpha = (lang == HLSL_D3D11 || lang == HLSL_D3D11_LEVEL9) ? "u_fogcoef_stencilreplace.z" : "u_stencilReplaceValue";
+			replacedAlpha = "u_stencilReplaceValue";
 			break;
 
 		case STENCIL_VALUE_ZERO:

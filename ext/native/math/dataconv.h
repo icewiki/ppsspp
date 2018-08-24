@@ -105,6 +105,17 @@ inline void CopyFloat3(float dest[3], const float src[3]) {
 	dest[2] = src[2];
 }
 
+inline void CopyFloat4(float dest[3], const float src[3]) {
+#ifdef _M_SSE
+	_mm_storeu_ps(dest, _mm_loadu_ps(src));
+#else
+	dest[0] = src[0];
+	dest[1] = src[1];
+	dest[2] = src[2];
+	dest[3] = src[3];
+#endif
+}
+
 inline void CopyFloat1To4(float dest[4], const float src) {
 #ifdef _M_SSE
 	_mm_storeu_ps(dest, _mm_set_ss(src));
@@ -145,4 +156,8 @@ inline void ExpandFloat24x3ToFloat4(float dest[4], const uint32_t src[3]) {
 	uint32_t temp[4] = { src[0] << 8, src[1] << 8, src[2] << 8, 0 };
 	memcpy(dest, temp, sizeof(float) * 4);
 #endif
+}
+
+inline uint32_t BytesToUint32(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+	return (a) | (b << 8) | (c << 16) | (d << 24);
 }

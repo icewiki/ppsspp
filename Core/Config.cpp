@@ -22,23 +22,26 @@
 
 #include "base/display.h"
 #include "base/NativeApp.h"
-#include "ext/vjson/json.h"
 #include "file/ini_file.h"
 #include "i18n/i18n.h"
+#include "json/json_reader.h"
 #include "gfx_es2/gpu_features.h"
 #include "net/http_client.h"
 #include "util/text/parsers.h"
 #include "net/url.h"
 
 #include "Common/CPUDetect.h"
-#include "Common/KeyMap.h"
 #include "Common/FileUtil.h"
-#include "Common/StringUtils.h"
+#include "Common/KeyMap.h"
 #include "Common/LogManager.h"
+#include "Common/OSVersion.h"
+#include "Common/StringUtils.h"
+#include "Common/Vulkan/VulkanLoader.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/Loaders.h"
+#include "Core/HLE/sceUtility.h"
 #include "GPU/Common/FramebufferCommon.h"
-#include "HLE/sceUtility.h"
 
 // TODO: Find a better place for this.
 http::Downloader g_DownloadManager;
@@ -53,11 +56,6 @@ static const char *logSectionName = "LogDebug";
 static const char *logSectionName = "Log";
 #endif
 
-
-#ifdef IOS
-extern bool iosCanUseJit;
-#endif
-
 struct ConfigSetting {
 	enum Type {
 		TYPE_TERMINATOR,
@@ -66,6 +64,7 @@ struct ConfigSetting {
 		TYPE_UINT32,
 		TYPE_FLOAT,
 		TYPE_STRING,
+		TYPE_TOUCH_POS,
 	};
 	union Value {
 		bool b;
@@ -73,6 +72,7 @@ struct ConfigSetting {
 		uint32_t u;
 		float f;
 		const char *s;
+		ConfigTouchPos touchPos;
 	};
 	union SettingPtr {
 		bool *b;
@@ -80,6 +80,7 @@ struct ConfigSetting {
 		uint32_t *u;
 		float *f;
 		std::string *s;
+		ConfigTouchPos *touchPos;
 	};
 
 	typedef bool (*BoolDefaultCallback)();
@@ -87,6 +88,7 @@ struct ConfigSetting {
 	typedef uint32_t (*Uint32DefaultCallback)();
 	typedef float (*FloatDefaultCallback)();
 	typedef const char *(*StringDefaultCallback)();
+	typedef ConfigTouchPos (*TouchPosDefaultCallback)();
 
 	union Callback {
 		BoolDefaultCallback b;
@@ -94,6 +96,7 @@ struct ConfigSetting {
 		Uint32DefaultCallback u;
 		FloatDefaultCallback f;
 		StringDefaultCallback s;
+		TouchPosDefaultCallback touchPos;
 	};
 
 	ConfigSetting(bool v)
@@ -137,6 +140,13 @@ struct ConfigSetting {
 		default_.s = def;
 	}
 
+	ConfigSetting(const char *iniX, const char *iniY, const char *iniScale, const char *iniShow, ConfigTouchPos *v, ConfigTouchPos def, bool save = true, bool perGame = false)
+		: ini_(iniX), ini2_(iniY), ini3_(iniScale), ini4_(iniShow), type_(TYPE_TOUCH_POS), report_(false), save_(save), perGame_(perGame) {
+		ptr_.touchPos = v;
+		cb_.touchPos = nullptr;
+		default_.touchPos = def;
+	}
+
 	ConfigSetting(const char *ini, bool *v, BoolDefaultCallback def, bool save = true, bool perGame = false)
 		: ini_(ini), type_(TYPE_BOOL), report_(false), save_(save), perGame_(perGame) {
 		ptr_.b = v;
@@ -165,6 +175,12 @@ struct ConfigSetting {
 		: ini_(ini), type_(TYPE_STRING), report_(false), save_(save), perGame_(perGame) {
 		ptr_.s = v;
 		cb_.s = def;
+	}
+
+	ConfigSetting(const char *iniX, const char *iniY, const char *iniScale, const char *iniShow, ConfigTouchPos *v, TouchPosDefaultCallback def, bool save = true, bool perGame = false)
+		: ini_(iniX), ini2_(iniY), ini3_(iniScale), ini4_(iniShow), type_(TYPE_TOUCH_POS), report_(false), save_(save), perGame_(perGame) {
+		ptr_.touchPos = v;
+		cb_.touchPos = def;
 	}
 
 	bool HasMore() const {
@@ -198,6 +214,19 @@ struct ConfigSetting {
 				default_.s = cb_.s();
 			}
 			return section->Get(ini_, ptr_.s, default_.s);
+		case TYPE_TOUCH_POS:
+			if (cb_.touchPos) {
+				default_.touchPos = cb_.touchPos();
+			}
+			section->Get(ini_, &ptr_.touchPos->x, default_.touchPos.x);
+			section->Get(ini2_, &ptr_.touchPos->y, default_.touchPos.y);
+			section->Get(ini3_, &ptr_.touchPos->scale, default_.touchPos.scale);
+			if (ini4_) {
+				section->Get(ini4_, &ptr_.touchPos->show, default_.touchPos.show);
+			} else {
+				ptr_.touchPos->show = default_.touchPos.show;
+			}
+			return true;
 		default:
 			_dbg_assert_msg_(LOADER, false, "Unexpected ini setting type");
 			return false;
@@ -219,6 +248,14 @@ struct ConfigSetting {
 			return section->Set(ini_, *ptr_.f);
 		case TYPE_STRING:
 			return section->Set(ini_, *ptr_.s);
+		case TYPE_TOUCH_POS:
+			section->Set(ini_, ptr_.touchPos->x);
+			section->Set(ini2_, ptr_.touchPos->y);
+			section->Set(ini3_, ptr_.touchPos->scale);
+			if (ini4_) {
+				section->Set(ini4_, ptr_.touchPos->show);
+			}
+			return;
 		default:
 			_dbg_assert_msg_(LOADER, false, "Unexpected ini setting type");
 			return;
@@ -240,6 +277,9 @@ struct ConfigSetting {
 			return data.Add(prefix + ini_, *ptr_.f);
 		case TYPE_STRING:
 			return data.Add(prefix + ini_, *ptr_.s);
+		case TYPE_TOUCH_POS:
+			// Doesn't report.
+			return;
 		default:
 			_dbg_assert_msg_(LOADER, false, "Unexpected ini setting type");
 			return;
@@ -247,6 +287,9 @@ struct ConfigSetting {
 	}
 
 	const char *ini_;
+	const char *ini2_;
+	const char *ini3_;
+	const char *ini4_;
 	Type type_;
 	bool report_;
 	bool save_;
@@ -312,11 +355,8 @@ static int DefaultNumWorkers() {
 	return cpu_info.num_cores;
 }
 
-// TODO: Default to IRJit on iOS when it's done.
 static int DefaultCpuCore() {
-#ifdef IOS
-	return (int)(iosCanUseJit ? CPUCore::JIT : CPUCore::INTERPRETER);
-#elif defined(ARM) || defined(ARM64) || defined(_M_IX86) || defined(_M_X64)
+#if defined(ARM) || defined(ARM64) || defined(_M_IX86) || defined(_M_X64)
 	return (int)CPUCore::JIT;
 #else
 	return (int)CPUCore::INTERPRETER;
@@ -324,13 +364,19 @@ static int DefaultCpuCore() {
 }
 
 static bool DefaultCodeGen() {
-#ifdef IOS
-	return iosCanUseJit ? true : false;
-#elif defined(ARM) || defined(ARM64) || defined(_M_IX86) || defined(_M_X64)
+#if defined(ARM) || defined(ARM64) || defined(_M_IX86) || defined(_M_X64)
 	return true;
 #else
 	return false;
 #endif
+}
+
+static bool DefaultEnableStateUndo() {
+#ifdef MOBILE_DEVICE
+	// Off on mobile to save disk space.
+	return false;
+#endif
+	return true;
 }
 
 struct ConfigSectionSettings {
@@ -350,9 +396,10 @@ static ConfigSetting generalSettings[] = {
 	ConfigSetting("CheckForNewVersion", &g_Config.bCheckForNewVersion, true),
 	ConfigSetting("Language", &g_Config.sLanguageIni, &DefaultLangRegion),
 	ConfigSetting("ForceLagSync", &g_Config.bForceLagSync, false, true, true),
+	ConfigSetting("DiscordPresence", &g_Config.bDiscordPresence, true, true, false),  // Or maybe it makes sense to have it per-game? Race conditions abound...
 
 	ReportedConfigSetting("NumWorkerThreads", &g_Config.iNumWorkerThreads, &DefaultNumWorkers, true, true),
-	ConfigSetting("EnableAutoLoad", &g_Config.bEnableAutoLoad, false, true, true),
+	ConfigSetting("AutoLoadSaveState", &g_Config.iAutoLoadSaveState, 0, true, true),
 	ReportedConfigSetting("EnableCheats", &g_Config.bEnableCheats, false, true, true),
 	ConfigSetting("CwCheatRefreshRate", &g_Config.iCwCheatRefreshRate, 77, true, true),
 
@@ -360,7 +407,9 @@ static ConfigSetting generalSettings[] = {
 	ConfigSetting("UseFFV1", &g_Config.bUseFFV1, false),
 	ConfigSetting("DumpFrames", &g_Config.bDumpFrames, false),
 	ConfigSetting("DumpAudio", &g_Config.bDumpAudio, false),
+	ConfigSetting("SaveLoadResetsAVdumping", &g_Config.bSaveLoadResetsAVdumping, false),
 	ConfigSetting("StateSlot", &g_Config.iCurrentStateSlot, 0, true, true),
+	ConfigSetting("EnableStateUndo", &g_Config.bEnableStateUndo, &DefaultEnableStateUndo, true, true),
 	ConfigSetting("RewindFlipFrequency", &g_Config.iRewindFlipFrequency, 0, true, true),
 
 	ConfigSetting("GridView1", &g_Config.bGridView1, true),
@@ -376,12 +425,14 @@ static ConfigSetting generalSettings[] = {
 	ConfigSetting("LastRemoteISOServer", &g_Config.sLastRemoteISOServer, ""),
 	ConfigSetting("LastRemoteISOPort", &g_Config.iLastRemoteISOPort, 0),
 	ConfigSetting("RemoteISOManualConfig", &g_Config.bRemoteISOManual, false),
+	ConfigSetting("RemoteShareOnStartup", &g_Config.bRemoteShareOnStartup, false),
 	ConfigSetting("RemoteISOSubdir", &g_Config.sRemoteISOSubdir, "/"),
+	ConfigSetting("RemoteDebuggerOnStartup", &g_Config.bRemoteDebuggerOnStartup, false),
 
 #ifdef __ANDROID__
-	ConfigSetting("ScreenRotation", &g_Config.iScreenRotation, 1),
+	ConfigSetting("ScreenRotation", &g_Config.iScreenRotation, ROTATION_LOCKED_HORIZONTAL),
 #endif
-	ConfigSetting("InternalScreenRotation", &g_Config.iInternalScreenRotation, 1),
+	ConfigSetting("InternalScreenRotation", &g_Config.iInternalScreenRotation, ROTATION_LOCKED_HORIZONTAL),
 
 #if defined(USING_WIN_UI)
 	ConfigSetting("TopMost", &g_Config.bTopMost, false),
@@ -406,13 +457,14 @@ static bool DefaultSasThread() {
 
 static ConfigSetting cpuSettings[] = {
 	ReportedConfigSetting("CPUCore", &g_Config.iCpuCore, &DefaultCpuCore, true, true),
-	ReportedConfigSetting("SeparateCPUThread", &g_Config.bSeparateCPUThread, false, true, true),
 	ReportedConfigSetting("SeparateSASThread", &g_Config.bSeparateSASThread, &DefaultSasThread, true, true),
 	ReportedConfigSetting("SeparateIOThread", &g_Config.bSeparateIOThread, true, true, true),
 	ReportedConfigSetting("IOTimingMethod", &g_Config.iIOTimingMethod, IOTIMING_FAST, true, true),
 	ConfigSetting("FastMemoryAccess", &g_Config.bFastMemory, true, true, true),
 	ReportedConfigSetting("FuncReplacements", &g_Config.bFuncReplacements, true, true, true),
 	ConfigSetting("HideSlowWarnings", &g_Config.bHideSlowWarnings, false, true, false),
+	ConfigSetting("HideStateWarnings", &g_Config.bHideStateWarnings, false, true, false),
+	ConfigSetting("PreloadFunctions", &g_Config.bPreloadFunctions, false, true, true),
 	ReportedConfigSetting("CPUSpeed", &g_Config.iLockedCPUSpeed, 0, true, true),
 
 	ConfigSetting(false),
@@ -433,7 +485,9 @@ static int DefaultInternalResolution() {
 	return 0;
 #else
 	int longestDisplaySide = std::max(System_GetPropertyInt(SYSPROP_DISPLAY_XRES), System_GetPropertyInt(SYSPROP_DISPLAY_YRES));
-	return longestDisplaySide >= 1000 ? 2 : 1;
+	int scale = longestDisplaySide >= 1000 ? 2 : 1;
+	ILOG("Longest display side: %d pixels. Choosing scale %d", longestDisplaySide, scale);
+	return scale;
 #endif
 }
 
@@ -446,7 +500,7 @@ static bool DefaultFrameskipUnthrottle() {
 }
 
 static int DefaultZoomType() {
-	return 2;
+	return (int)SmallDisplayZoom::AUTO;
 }
 
 static bool DefaultTimerHack() {
@@ -475,38 +529,60 @@ static int DefaultAndroidHwScale() {
 #endif
 }
 
+static int DefaultGPUBackend() {
+#if PPSSPP_PLATFORM(WINDOWS) || PPSSPP_PLATFORM(ANDROID)
+	// Where supported, let's use Vulkan.
+	if (VulkanMayBeAvailable()) {
+		return (int)GPUBackend::VULKAN;
+	}
+#endif
+#if PPSSPP_PLATFORM(WINDOWS)
+	// If no Vulkan, use Direct3D 11 on Windows 8+ (most importantly 10.)
+	if (DoesVersionMatchWindows(6, 2, 0, 0, true)) {
+		return (int)GPUBackend::DIRECT3D11;
+	}
+#endif
+	return (int)GPUBackend::OPENGL;
+}
+
+static bool DefaultVertexCache() {
+	return DefaultGPUBackend() == (int)GPUBackend::OPENGL;
+}
+
 static ConfigSetting graphicsSettings[] = {
 	ConfigSetting("EnableCardboard", &g_Config.bEnableCardboard, false, true, true),
 	ConfigSetting("CardboardScreenSize", &g_Config.iCardboardScreenSize, 50, true, true),
 	ConfigSetting("CardboardXShift", &g_Config.iCardboardXShift, 0, true, true),
 	ConfigSetting("CardboardYShift", &g_Config.iCardboardXShift, 0, true, true),
 	ConfigSetting("ShowFPSCounter", &g_Config.iShowFPSCounter, 0, true, true),
-	ReportedConfigSetting("GPUBackend", &g_Config.iGPUBackend, 0),
+	ReportedConfigSetting("GraphicsBackend", &g_Config.iGPUBackend, &DefaultGPUBackend),
+	ConfigSetting("VulkanDevice", &g_Config.sVulkanDevice, "", true, false),
+#ifdef _WIN32
+	ConfigSetting("D3D11Device", &g_Config.sD3D11Device, "", true, false),
+#endif
 	ReportedConfigSetting("RenderingMode", &g_Config.iRenderingMode, &DefaultRenderingMode, true, true),
 	ConfigSetting("SoftwareRenderer", &g_Config.bSoftwareRendering, false, true, true),
 	ReportedConfigSetting("HardwareTransform", &g_Config.bHardwareTransform, true, true, true),
 	ReportedConfigSetting("SoftwareSkinning", &g_Config.bSoftwareSkinning, true, true, true),
 	ReportedConfigSetting("TextureFiltering", &g_Config.iTexFiltering, 1, true, true),
-	ReportedConfigSetting("BufferFiltering", &g_Config.iBufFilter, 1, true, true),
+	ReportedConfigSetting("BufferFiltering", &g_Config.iBufFilter, SCALE_LINEAR, true, true),
 	ReportedConfigSetting("InternalResolution", &g_Config.iInternalResolution, &DefaultInternalResolution, true, true),
 	ReportedConfigSetting("AndroidHwScale", &g_Config.iAndroidHwScale, &DefaultAndroidHwScale),
 	ReportedConfigSetting("HighQualityDepth", &g_Config.bHighQualityDepth, true, true, true),
 	ReportedConfigSetting("FrameSkip", &g_Config.iFrameSkip, 0, true, true),
 	ReportedConfigSetting("AutoFrameSkip", &g_Config.bAutoFrameSkip, false, true, true),
-	ConfigSetting("FrameRate", &g_Config.iFpsLimit, 0, true, true),
+	ConfigSetting("FrameRate", &g_Config.iFpsLimit1, 0, true, true),
+	ConfigSetting("FrameRate2", &g_Config.iFpsLimit2, -1, true, true),
 	ConfigSetting("FrameSkipUnthrottle", &g_Config.bFrameSkipUnthrottle, &DefaultFrameskipUnthrottle, true, false),
 #if defined(USING_WIN_UI)
 	ConfigSetting("RestartRequired", &g_Config.bRestartRequired, false, false),
 #endif
 	ReportedConfigSetting("ForceMaxEmulatedFPS", &g_Config.iForceMaxEmulatedFPS, 60, true, true),
 
-	// TODO: Hm, on fast mobile GPUs we should definitely default to at least 4 (setting = 2)...
-#ifdef MOBILE_DEVICE
-	ConfigSetting("AnisotropyLevel", &g_Config.iAnisotropyLevel, 0, true, true),
-#else
+	// Most low-performance (and many high performance) mobile GPUs do not support aniso anyway so defaulting to 4 is fine.
 	ConfigSetting("AnisotropyLevel", &g_Config.iAnisotropyLevel, 4, true, true),
-#endif
-	ReportedConfigSetting("VertexCache", &g_Config.bVertexCache, true, true, true),
+
+	ReportedConfigSetting("VertexDecCache", &g_Config.bVertexCache, &DefaultVertexCache, true, true),
 	ReportedConfigSetting("TextureBackoffCache", &g_Config.bTextureBackoffCache, false, true, true),
 	ReportedConfigSetting("TextureSecondaryCache", &g_Config.bTextureSecondaryCache, false, true, true),
 	ReportedConfigSetting("VertexDecJit", &g_Config.bVertexDecoderJit, &DefaultCodeGen, false),
@@ -545,6 +621,7 @@ static ConfigSetting graphicsSettings[] = {
 	ReportedConfigSetting("FragmentTestCache", &g_Config.bFragmentTestCache, true, true, true),
 
 	ConfigSetting("GfxDebugOutput", &g_Config.bGfxDebugOutput, false, false, false),
+	ConfigSetting("GfxDebugSplitSubmit", &g_Config.bGfxDebugSplitSubmit, false, false, false),
 	ConfigSetting("LogFrameDrops", &g_Config.bLogFrameDrops, false, true, false),
 
 	ConfigSetting(false),
@@ -581,26 +658,16 @@ static bool DefaultShowTouchControls() {
 }
 
 static const float defaultControlScale = 1.15f;
+static const ConfigTouchPos defaultTouchPosShow = { -1.0f, -1.0f, defaultControlScale, true };
+static const ConfigTouchPos defaultTouchPosHide = { -1.0f, -1.0f, defaultControlScale, false };
 
 static ConfigSetting controlSettings[] = {
-	ConfigSetting("HapticFeedback", &g_Config.bHapticFeedback, true, true, true),
+	ConfigSetting("HapticFeedback", &g_Config.bHapticFeedback, false, true, true),
 	ConfigSetting("ShowTouchCross", &g_Config.bShowTouchCross, true, true, true),
 	ConfigSetting("ShowTouchCircle", &g_Config.bShowTouchCircle, true, true, true),
 	ConfigSetting("ShowTouchSquare", &g_Config.bShowTouchSquare, true, true, true),
 	ConfigSetting("ShowTouchTriangle", &g_Config.bShowTouchTriangle, true, true, true),
-	ConfigSetting("ShowTouchStart", &g_Config.bShowTouchStart, true, true, true),
-	ConfigSetting("ShowTouchSelect", &g_Config.bShowTouchSelect, true, true, true),
-	ConfigSetting("ShowTouchLTrigger", &g_Config.bShowTouchLTrigger, true, true, true),
-	ConfigSetting("ShowTouchRTrigger", &g_Config.bShowTouchRTrigger, true, true, true),
-	ConfigSetting("ShowAnalogStick", &g_Config.bShowTouchAnalogStick, true, true, true),
-	ConfigSetting("ShowTouchDpad", &g_Config.bShowTouchDpad, true, true, true),
-	ConfigSetting("ShowTouchUnthrottle", &g_Config.bShowTouchUnthrottle, true, true, true),
 
-	ConfigSetting("ShowComboKey0", &g_Config.bShowComboKey0, false, true, true),
-	ConfigSetting("ShowComboKey1", &g_Config.bShowComboKey1, false, true, true),
-	ConfigSetting("ShowComboKey2", &g_Config.bShowComboKey2, false, true, true),
-	ConfigSetting("ShowComboKey3", &g_Config.bShowComboKey3, false, true, true),
-	ConfigSetting("ShowComboKey4", &g_Config.bShowComboKey4, false, true, true),
 	ConfigSetting("ComboKey0Mapping", &g_Config.iCombokey0, 0, true, true),
 	ConfigSetting("ComboKey1Mapping", &g_Config.iCombokey1, 0, true, true),
 	ConfigSetting("ComboKey2Mapping", &g_Config.iCombokey2, 0, true, true),
@@ -640,49 +707,26 @@ static ConfigSetting controlSettings[] = {
 
 	// -1.0f means uninitialized, set in GamepadEmu::CreatePadLayout().
 	ConfigSetting("ActionButtonSpacing2", &g_Config.fActionButtonSpacing, 1.0f, true, true),
-	ConfigSetting("ActionButtonCenterX", &g_Config.fActionButtonCenterX, -1.0f, true, true),
-	ConfigSetting("ActionButtonCenterY", &g_Config.fActionButtonCenterY, -1.0f, true, true),
-	ConfigSetting("ActionButtonScale", &g_Config.fActionButtonScale, defaultControlScale, true, true),
-	ConfigSetting("DPadX", &g_Config.fDpadX, -1.0f, true, true),
-	ConfigSetting("DPadY", &g_Config.fDpadY, -1.0f, true, true),
+	ConfigSetting("ActionButtonCenterX", "ActionButtonCenterY", "ActionButtonScale", nullptr, &g_Config.touchActionButtonCenter, defaultTouchPosShow, true, true),
+	ConfigSetting("DPadX", "DPadY", "DPadScale", "ShowTouchDpad", &g_Config.touchDpad, defaultTouchPosShow, true, true),
 
 	// Note: these will be overwritten if DPadRadius is set.
-	ConfigSetting("DPadScale", &g_Config.fDpadScale, defaultControlScale, true, true),
 	ConfigSetting("DPadSpacing", &g_Config.fDpadSpacing, 1.0f, true, true),
-	ConfigSetting("StartKeyX", &g_Config.fStartKeyX, -1.0f, true, true),
-	ConfigSetting("StartKeyY", &g_Config.fStartKeyY, -1.0f, true, true),
-	ConfigSetting("StartKeyScale", &g_Config.fStartKeyScale, defaultControlScale, true, true),
-	ConfigSetting("SelectKeyX", &g_Config.fSelectKeyX, -1.0f, true, true),
-	ConfigSetting("SelectKeyY", &g_Config.fSelectKeyY, -1.0f, true, true),
-	ConfigSetting("SelectKeyScale", &g_Config.fSelectKeyScale, defaultControlScale, true, true),
-	ConfigSetting("UnthrottleKeyX", &g_Config.fUnthrottleKeyX, -1.0f, true, true),
-	ConfigSetting("UnthrottleKeyY", &g_Config.fUnthrottleKeyY, -1.0f, true, true),
-	ConfigSetting("UnthrottleKeyScale", &g_Config.fUnthrottleKeyScale, defaultControlScale, true, true),
-	ConfigSetting("LKeyX", &g_Config.fLKeyX, -1.0f, true, true),
-	ConfigSetting("LKeyY", &g_Config.fLKeyY, -1.0f, true, true),
-	ConfigSetting("LKeyScale", &g_Config.fLKeyScale, defaultControlScale, true, true),
-	ConfigSetting("RKeyX", &g_Config.fRKeyX, -1.0f, true, true),
-	ConfigSetting("RKeyY", &g_Config.fRKeyY, -1.0f, true, true),
-	ConfigSetting("RKeyScale", &g_Config.fRKeyScale, defaultControlScale, true, true),
-	ConfigSetting("AnalogStickX", &g_Config.fAnalogStickX, -1.0f, true, true),
-	ConfigSetting("AnalogStickY", &g_Config.fAnalogStickY, -1.0f, true, true),
-	ConfigSetting("AnalogStickScale", &g_Config.fAnalogStickScale, defaultControlScale, true, true),
+	ConfigSetting("StartKeyX", "StartKeyY", "StartKeyScale", "ShowTouchStart", &g_Config.touchStartKey, defaultTouchPosShow, true, true),
+	ConfigSetting("SelectKeyX", "SelectKeyY", "SelectKeyScale", "ShowTouchSelect", &g_Config.touchSelectKey, defaultTouchPosShow, true, true),
+	ConfigSetting("UnthrottleKeyX", "UnthrottleKeyY", "UnthrottleKeyScale", "ShowTouchUnthrottle", &g_Config.touchUnthrottleKey, defaultTouchPosShow, true, true),
+	ConfigSetting("LKeyX", "LKeyY", "LKeyScale", "ShowTouchLTrigger", &g_Config.touchLKey, defaultTouchPosShow, true, true),
+	ConfigSetting("RKeyX", "RKeyY", "RKeyScale", "ShowTouchRTrigger", &g_Config.touchRKey, defaultTouchPosShow, true, true),
+	ConfigSetting("AnalogStickX", "AnalogStickY", "AnalogStickScale", "ShowAnalogStick", &g_Config.touchAnalogStick, defaultTouchPosShow, true, true),
 
-	ConfigSetting("fcombo0X", &g_Config.fcombo0X, -1.0f, true, true),
-	ConfigSetting("fcombo0Y", &g_Config.fcombo0Y, -1.0f, true, true),
-	ConfigSetting("comboKeyScale0", &g_Config.fcomboScale0, defaultControlScale, true, true),
-	ConfigSetting("fcombo1X", &g_Config.fcombo1X, -1.0f, true, true),
-	ConfigSetting("fcombo1Y", &g_Config.fcombo1Y, -1.0f, true, true),
-	ConfigSetting("comboKeyScale1", &g_Config.fcomboScale1, defaultControlScale, true, true),
-	ConfigSetting("fcombo2X", &g_Config.fcombo2X, -1.0f, true, true),
-	ConfigSetting("fcombo2Y", &g_Config.fcombo2Y, -1.0f, true, true),
-	ConfigSetting("comboKeyScale2", &g_Config.fcomboScale2, defaultControlScale, true, true),
-	ConfigSetting("fcombo3X", &g_Config.fcombo3X, -1.0f, true, true),
-	ConfigSetting("fcombo3Y", &g_Config.fcombo3Y, -1.0f, true, true),
-	ConfigSetting("comboKeyScale3", &g_Config.fcomboScale3, defaultControlScale, true, true),
-	ConfigSetting("fcombo4X", &g_Config.fcombo4X, -1.0f, true, true),
-	ConfigSetting("fcombo4Y", &g_Config.fcombo4Y, -1.0f, true, true),
-	ConfigSetting("comboKeyScale4", &g_Config.fcomboScale4, defaultControlScale, true, true),
+	ConfigSetting("fcombo0X", "fcombo0Y", "comboKeyScale0", "ShowComboKey0", &g_Config.touchCombo0, defaultTouchPosHide, true, true),
+	ConfigSetting("fcombo1X", "fcombo1Y", "comboKeyScale1", "ShowComboKey1", &g_Config.touchCombo1, defaultTouchPosHide, true, true),
+	ConfigSetting("fcombo2X", "fcombo2Y", "comboKeyScale2", "ShowComboKey2", &g_Config.touchCombo2, defaultTouchPosHide, true, true),
+	ConfigSetting("fcombo3X", "fcombo3Y", "comboKeyScale3", "ShowComboKey3", &g_Config.touchCombo3, defaultTouchPosHide, true, true),
+	ConfigSetting("fcombo4X", "fcombo4Y", "comboKeyScale4", "ShowComboKey4", &g_Config.touchCombo4, defaultTouchPosHide, true, true),
+	ConfigSetting("Speed1KeyX", "Speed1KeyY", "Speed1KeyScale", "ShowSpeed1Key", &g_Config.touchSpeed1Key, defaultTouchPosHide, true, true),
+	ConfigSetting("Speed2KeyX", "Speed2KeyY", "Speed2KeyScale", "ShowSpeed2Key", &g_Config.touchSpeed2Key, defaultTouchPosHide, true, true),
+
 #ifdef _WIN32
 	ConfigSetting("DInputAnalogDeadzone", &g_Config.fDInputAnalogDeadzone, 0.1f, true, true),
 	ConfigSetting("DInputAnalogInverseMode", &g_Config.iDInputAnalogInverseMode, 0, true, true),
@@ -700,8 +744,8 @@ static ConfigSetting controlSettings[] = {
 	ConfigSetting("UseMouse", &g_Config.bMouseControl, false, true, true),
 	ConfigSetting("MapMouse", &g_Config.bMapMouse, false, true, true),
 	ConfigSetting("ConfineMap", &g_Config.bMouseConfine, false, true, true),
-	ConfigSetting("MouseSensitivity", &g_Config.fMouseSensitivity, 0.1, true, true),
-	ConfigSetting("MouseSmoothing", &g_Config.fMouseSmoothing, 0.9, true, true),
+	ConfigSetting("MouseSensitivity", &g_Config.fMouseSensitivity, 0.1f, true, true),
+	ConfigSetting("MouseSmoothing", &g_Config.fMouseSmoothing, 0.9f, true, true),
 
 	ConfigSetting(false),
 };
@@ -738,7 +782,7 @@ static ConfigSetting systemParamSettings[] = {
 	ReportedConfigSetting("PSPModel", &g_Config.iPSPModel, &DefaultPSPModel, true, true),
 	ReportedConfigSetting("PSPFirmwareVersion", &g_Config.iFirmwareVersion, PSP_DEFAULT_FIRMWARE, true, true),
 	ConfigSetting("NickName", &g_Config.sNickName, "PPSSPP", true, true),
-	ConfigSetting("proAdhocServer", &g_Config.proAdhocServer, "", true, true),
+	ConfigSetting("proAdhocServer", &g_Config.proAdhocServer, "coldbird.net", true, true),
 	ConfigSetting("MacAddress", &g_Config.sMACAddress, "", true, true),
 	ConfigSetting("PortOffset", &g_Config.iPortOffset, 0, true, true),
 	ReportedConfigSetting("Language", &g_Config.iLanguage, &DefaultSystemParamLanguage, true, true),
@@ -754,7 +798,7 @@ static ConfigSetting systemParamSettings[] = {
 #endif
 	ConfigSetting("WlanPowerSave", &g_Config.bWlanPowerSave, (bool) PSP_SYSTEMPARAM_WLAN_POWERSAVE_OFF, true, true),
 	ReportedConfigSetting("EncryptSave", &g_Config.bEncryptSave, true, true, true),
-	ConfigSetting("SavedataUpgrade", &g_Config.bSavedataUpgrade, false, true, false),
+	ConfigSetting("SavedataUpgradeVersion", &g_Config.bSavedataUpgrade, true, true, false),
 
 	ConfigSetting(false),
 };
@@ -775,6 +819,7 @@ static ConfigSetting debuggerSettings[] = {
 	ConfigSetting("DisplayStatusBar", &g_Config.bDisplayStatusBar, true),
 	ConfigSetting("ShowBottomTabTitles",&g_Config.bShowBottomTabTitles,true),
 	ConfigSetting("ShowDeveloperMenu", &g_Config.bShowDeveloperMenu, false),
+	ConfigSetting("ShowAllocatorDebug", &g_Config.bShowAllocatorDebug, false, false),
 	ConfigSetting("SkipDeadbeefFilling", &g_Config.bSkipDeadbeefFilling, false),
 	ConfigSetting("FuncHashMap", &g_Config.bFuncHashMap, false),
 
@@ -906,7 +951,7 @@ void Config::Load(const char *iniFileName, const char *controllerIniFilename) {
 
 	IniFile iniFile;
 	if (!iniFile.Load(iniFilename_)) {
-		ERROR_LOG(LOADER, "Failed to read %s. Setting config to default.", iniFilename_.c_str());
+		ERROR_LOG(LOADER, "Failed to read '%s'. Setting config to default.", iniFilename_.c_str());
 		// Continue anyway to initialize the config.
 	}
 
@@ -957,6 +1002,9 @@ void Config::Load(const char *iniFileName, const char *controllerIniFilename) {
 	if (iAnisotropyLevel > 4) {
 		iAnisotropyLevel = 4;
 	}
+	if (iRenderingMode != FB_NON_BUFFERED_MODE && iRenderingMode != FB_BUFFERED_MODE) {
+		g_Config.iRenderingMode = FB_BUFFERED_MODE;
+	}
 
 	// Check for an old dpad setting
 	IniFile::Section *control = iniFile.GetOrCreateSection("Control");
@@ -964,40 +1012,6 @@ void Config::Load(const char *iniFileName, const char *controllerIniFilename) {
 	control->Get("DPadRadius", &f, 0.0f);
 	if (f > 0.0f) {
 		ResetControlLayout();
-	}
-
-	// MIGRATION: For users who had the old static touch layout, aren't I nice?
-	// We can probably kill this in 0.9.8 or something.
-	if (fDpadX > 1.0 || fDpadY > 1.0) { // Likely the rest are too!
-		float screen_width = dp_xres;
-		float screen_height = dp_yres;
-
-		fActionButtonCenterX /= screen_width;
-		fActionButtonCenterY /= screen_height;
-		fDpadX /= screen_width;
-		fDpadY /= screen_height;
-		fStartKeyX /= screen_width;
-		fStartKeyY /= screen_height;
-		fSelectKeyX /= screen_width;
-		fSelectKeyY /= screen_height;
-		fUnthrottleKeyX /= screen_width;
-		fUnthrottleKeyY /= screen_height;
-		fLKeyX /= screen_width;
-		fLKeyY /= screen_height;
-		fRKeyX /= screen_width;
-		fRKeyY /= screen_height;
-		fAnalogStickX /= screen_width;
-		fAnalogStickY /= screen_height;
-		fcombo0X /= screen_width;
-		fcombo0Y /= screen_height;
-		fcombo1X /= screen_width;
-		fcombo1Y /= screen_height;
-		fcombo2X /= screen_width;
-		fcombo2Y /= screen_height;
-		fcombo3X /= screen_width;
-		fcombo3Y /= screen_height;
-		fcombo4X /= screen_width;
-		fcombo4Y /= screen_height;
 	}
 
 	const char *gitVer = PPSSPP_GIT_VERSION;
@@ -1063,7 +1077,7 @@ void Config::Save() {
 		CleanRecent();
 		IniFile iniFile;
 		if (!iniFile.Load(iniFilename_.c_str())) {
-			ERROR_LOG(LOADER, "Error saving config - can't read ini %s", iniFilename_.c_str());
+			ERROR_LOG(LOADER, "Error saving config - can't read ini '%s'", iniFilename_.c_str());
 		}
 
 		// Need to do this somewhere...
@@ -1104,20 +1118,21 @@ void Config::Save() {
 			LogManager::GetInstance()->SaveConfig(log);
 
 		if (!iniFile.Save(iniFilename_.c_str())) {
-			ERROR_LOG(LOADER, "Error saving config - can't write ini %s", iniFilename_.c_str());
+			ERROR_LOG(LOADER, "Error saving config - can't write ini '%s'", iniFilename_.c_str());
+			System_SendMessage("toast", "Failed to save settings!\nCheck permissions, or try to restart the device.");
 			return;
 		}
-		INFO_LOG(LOADER, "Config saved: %s", iniFilename_.c_str());
+		INFO_LOG(LOADER, "Config saved: '%s'", iniFilename_.c_str());
 
 		if (!bGameSpecific) //otherwise we already did this in saveGameConfig()
 		{
 			IniFile controllerIniFile;
 			if (!controllerIniFile.Load(controllerIniFilename_.c_str())) {
-				ERROR_LOG(LOADER, "Error saving config - can't read ini %s", controllerIniFilename_.c_str());
+				ERROR_LOG(LOADER, "Error saving config - can't read ini '%s'", controllerIniFilename_.c_str());
 			}
 			KeyMap::SaveToIni(controllerIniFile);
 			if (!controllerIniFile.Save(controllerIniFilename_.c_str())) {
-				ERROR_LOG(LOADER, "Error saving config - can't write ini %s", controllerIniFilename_.c_str());
+				ERROR_LOG(LOADER, "Error saving config - can't write ini '%s'", controllerIniFilename_.c_str());
 				return;
 			}
 			INFO_LOG(LOADER, "Controller config saved: %s", controllerIniFilename_.c_str());
@@ -1148,14 +1163,14 @@ void Config::DownloadCompletedCallback(http::Download &download) {
 		return;
 	}
 
-	JsonReader reader(data.c_str(), data.size());
-	const json_value *root = reader.root();
+	json::JsonReader reader(data.c_str(), data.size());
+	const json::JsonGet root = reader.root();
 	if (!root) {
 		ERROR_LOG(LOADER, "Failed to parse json");
 		return;
 	}
 
-	std::string version = root->getString("version", "");
+	std::string version = root.getString("version", "");
 
 	const char *gitVer = PPSSPP_GIT_VERSION;
 	Version installed(gitVer);
@@ -1195,28 +1210,30 @@ void Config::AddRecent(const std::string &file) {
 	if (iMaxRecent <= 0)
 		return;
 
-#ifdef _WIN32
-	std::string filename = ReplaceAll(file, "\\", "/");
-#else
-	std::string filename = file;
-#endif
+	// We'll add it back below.  This makes sure it's at the front, and only once.
+	RemoveRecent(file);
 
-	for (auto str = recentIsos.begin(); str != recentIsos.end(); ++str) {
-#ifdef _WIN32
-		if (!strcmpIgnore((*str).c_str(), filename.c_str(), "\\", "/")) {
-#else
-		if (!strcmp((*str).c_str(), filename.c_str())) {
-#endif
-			recentIsos.erase(str);
-			recentIsos.insert(recentIsos.begin(), filename);
-			if ((int)recentIsos.size() > iMaxRecent)
-				recentIsos.resize(iMaxRecent);
-			return;
-		}
-	}
+	const std::string filename = File::ResolvePath(file);
 	recentIsos.insert(recentIsos.begin(), filename);
 	if ((int)recentIsos.size() > iMaxRecent)
 		recentIsos.resize(iMaxRecent);
+}
+
+void Config::RemoveRecent(const std::string &file) {
+	// Don't bother with this if the user disabled recents (it's -1).
+	if (iMaxRecent <= 0)
+		return;
+
+	const std::string filename = File::ResolvePath(file);
+	for (auto iter = recentIsos.begin(); iter != recentIsos.end();) {
+		const std::string recent = File::ResolvePath(*iter);
+		if (filename == recent) {
+			// Note that the increment-erase idiom doesn't work with vectors.
+			iter = recentIsos.erase(iter);
+		} else {
+			iter++;
+		}
+	}
 }
 
 void Config::CleanRecent() {
@@ -1396,47 +1413,28 @@ void Config::LoadStandardControllerIni() {
 }
 
 void Config::ResetControlLayout() {
-	g_Config.fActionButtonScale = defaultControlScale;
+	auto reset = [](ConfigTouchPos &pos) {
+		pos.x = defaultTouchPosShow.x;
+		pos.y = defaultTouchPosShow.y;
+		pos.scale = defaultTouchPosShow.scale;
+	};
+	reset(g_Config.touchActionButtonCenter);
 	g_Config.fActionButtonSpacing = 1.0f;
-	g_Config.fActionButtonCenterX = -1.0;
-	g_Config.fActionButtonCenterY = -1.0;
-	g_Config.fDpadScale = defaultControlScale;
+	reset(g_Config.touchDpad);
 	g_Config.fDpadSpacing = 1.0f;
-	g_Config.fDpadX = -1.0;
-	g_Config.fDpadY = -1.0;
-	g_Config.fStartKeyX = -1.0;
-	g_Config.fStartKeyY = -1.0;
-	g_Config.fStartKeyScale = defaultControlScale;
-	g_Config.fSelectKeyX = -1.0;
-	g_Config.fSelectKeyY = -1.0;
-	g_Config.fSelectKeyScale = defaultControlScale;
-	g_Config.fUnthrottleKeyX = -1.0;
-	g_Config.fUnthrottleKeyY = -1.0;
-	g_Config.fUnthrottleKeyScale = defaultControlScale;
-	g_Config.fLKeyX = -1.0;
-	g_Config.fLKeyY = -1.0;
-	g_Config.fLKeyScale = defaultControlScale;
-	g_Config.fRKeyX = -1.0;
-	g_Config.fRKeyY = -1.0;
-	g_Config.fRKeyScale = defaultControlScale;
-	g_Config.fAnalogStickX = -1.0;
-	g_Config.fAnalogStickY = -1.0;
-	g_Config.fAnalogStickScale = defaultControlScale;
-	g_Config.fcombo0X = -1.0;
-	g_Config.fcombo0Y = -1.0;
-	g_Config.fcomboScale0 = defaultControlScale;
-	g_Config.fcombo1X = -1.0f;
-	g_Config.fcombo1Y = -1.0f;
-	g_Config.fcomboScale1 = defaultControlScale;
-	g_Config.fcombo2X = -1.0f;
-	g_Config.fcombo2Y = -1.0f;
-	g_Config.fcomboScale2 = defaultControlScale;
-	g_Config.fcombo3X = -1.0f;
-	g_Config.fcombo3Y = -1.0f;
-	g_Config.fcomboScale3 = defaultControlScale;
-	g_Config.fcombo4X = -1.0f;
-	g_Config.fcombo4Y = -1.0f;
-	g_Config.fcomboScale4 = defaultControlScale;
+	reset(g_Config.touchStartKey);
+	reset(g_Config.touchSelectKey);
+	reset(g_Config.touchUnthrottleKey);
+	reset(g_Config.touchLKey);
+	reset(g_Config.touchRKey);
+	reset(g_Config.touchAnalogStick);
+	reset(g_Config.touchCombo0);
+	reset(g_Config.touchCombo1);
+	reset(g_Config.touchCombo2);
+	reset(g_Config.touchCombo3);
+	reset(g_Config.touchCombo4);
+	reset(g_Config.touchSpeed1Key);
+	reset(g_Config.touchSpeed2Key);
 }
 
 void Config::GetReportingInfo(UrlEncoder &data) {
@@ -1446,4 +1444,8 @@ void Config::GetReportingInfo(UrlEncoder &data) {
 			setting->Report(data, prefix);
 		}
 	}
+}
+
+bool Config::IsPortrait() const {
+	return (iInternalScreenRotation == ROTATION_LOCKED_VERTICAL || iInternalScreenRotation == ROTATION_LOCKED_VERTICAL180) && iRenderingMode != FB_NON_BUFFERED_MODE;
 }

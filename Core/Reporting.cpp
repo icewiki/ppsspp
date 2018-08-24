@@ -16,6 +16,8 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #include "Core/Reporting.h"
 
@@ -65,6 +67,8 @@ namespace Reporting
 	static bool currentSupported = false;
 	// Whether the most recent server request seemed successful.
 	static bool serverWorking = true;
+	// The latest compatibility result from the server.
+	static std::vector<std::string> lastCompatResult;
 
 	enum class RequestType
 	{
@@ -269,6 +273,8 @@ namespace Reporting
 		return "DragonFly";
 #elif defined(__FreeBSD__)
 		return "FreeBSD";
+#elif defined(__FreeBSD_kernel__) && defined(__GLIBC__)
+		return "GNU/kFreeBSD";
 #elif defined(__NetBSD__)
 		return "NetBSD";
 #elif defined(__OpenBSD__)
@@ -419,6 +425,7 @@ namespace Reporting
 			postdata.Add("speed", StringFromFormat("%d", payload.int2));
 			postdata.Add("gameplay", StringFromFormat("%d", payload.int3));
 			postdata.Add("crc", StringFromFormat("%08x", Core_GetPowerSaving() ? 0 : RetrieveCRC()));
+			postdata.Add("suggestions", payload.string1 != "perfect" && payload.string1 != "playable" ? "1" : "0");
 			AddScreenshotData(postdata, payload.string2);
 			payload.string1.clear();
 			payload.string2.clear();
@@ -428,12 +435,14 @@ namespace Reporting
 			if (!SendReportRequest("/report/compat", postdata.ToString(), postdata.GetMimeType(), &output)) {
 				serverWorking = false;
 			} else {
-				char res = 0;
-				if (!output.empty()) {
-					output.Take(1, &res);
-				}
-				if (res == 0)
+				std::string result;
+				output.TakeAll(&result);
+
+				lastCompatResult.clear();
+				if (result.empty() || result[0] == '0')
 					serverWorking = false;
+				else if (result[0] != '1')
+					SplitString(result, '\n', lastCompatResult);
 			}
 			break;
 
@@ -449,14 +458,11 @@ namespace Reporting
 	bool IsSupported()
 	{
 		// Disabled when using certain hacks, because they make for poor reports.
-		if (g_Config.iRenderingMode >= 2) // FBO_READFBOMEMORY_MIN
-			return false;
 		if (g_Config.bTimerHack)
 			return false;
 		if (CheatsInEffect())
 			return false;
-		// Not sure if we should support locked cpu at all, but definitely not far out values.
-		if (g_Config.iLockedCPUSpeed != 0 && (g_Config.iLockedCPUSpeed < 111 || g_Config.iLockedCPUSpeed > 333))
+		if (g_Config.iLockedCPUSpeed != 0)
 			return false;
 		// Don't allow builds without version info from git.  They're useless for reporting.
 		if (strcmp(PPSSPP_GIT_VERSION, "unknown") == 0)
@@ -503,18 +509,18 @@ namespace Reporting
 		g_Config.sReportHost = "default";
 	}
 
-	Status GetStatus()
+	ReportStatus GetStatus()
 	{
 		if (!serverWorking)
-			return Status::FAILING;
+			return ReportStatus::FAILING;
 
 		for (int pos = 0; pos < PAYLOAD_BUFFER_SIZE; ++pos)
 		{
 			if (payloadBuffer[pos].type != RequestType::NONE)
-				return Status::BUSY;
+				return ReportStatus::BUSY;
 		}
 
-		return Status::WORKING;
+		return ReportStatus::WORKING;
 	}
 
 	int NextFreePos()
@@ -592,5 +598,9 @@ namespace Reporting
 
 		std::thread th(Process, pos);
 		th.detach();
+	}
+
+	std::vector<std::string> CompatibilitySuggestions() {
+		return lastCompatResult;
 	}
 }

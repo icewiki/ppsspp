@@ -12,8 +12,8 @@ enum {
 	GPU_VENDOR_AMD = 2,
 	GPU_VENDOR_INTEL = 3,
 	GPU_VENDOR_ARM = 4,  // Mali
-	GPU_VENDOR_POWERVR = 5,
-	GPU_VENDOR_ADRENO = 6,
+	GPU_VENDOR_IMGTEC = 5,
+	GPU_VENDOR_QUALCOMM = 6,
 	GPU_VENDOR_BROADCOM = 7,
 	GPU_VENDOR_UNKNOWN = 0,
 };
@@ -23,6 +23,7 @@ enum {
 	BUG_PVR_SHADER_PRECISION_BAD = 2,
 	BUG_PVR_SHADER_PRECISION_TERRIBLE = 4,
 	BUG_PVR_GENMIPMAP_HEIGHT_GREATER = 8,
+	BUG_ANY_MAP_BUFFER_RANGE_SLOW = 16,
 };
 
 // Extensions to look at using:
@@ -61,6 +62,7 @@ struct GLExtensions {
 	bool ARB_vertex_array_object;
 	bool ARB_texture_float;
 	bool ARB_draw_instanced;
+	bool ARB_buffer_storage;
 
 	// EXT
 	bool EXT_swap_control_tear;
@@ -75,6 +77,7 @@ struct GLExtensions {
 	bool EXT_texture_filter_anisotropic;
 	bool PBO_EXT;
 	bool EXT_draw_instanced;
+	bool EXT_buffer_storage;
 
 	// NV
 	bool NV_shader_framebuffer_fetch;
@@ -96,8 +99,11 @@ struct GLExtensions {
 	int range[2][6][2];  // [vs,fs][lowf,mediumf,highf,lowi,mediumi,highi][min,max]
 	int precision[2][6];  // [vs,fs][lowf...]
 
+	int maxVertexTextureUnits;
+
 	// greater-or-equal than
 	bool VersionGEThan(int major, int minor, int sub = 0);
+	int GLSLVersion();
 };
 
 extern GLExtensions gl_extensions;

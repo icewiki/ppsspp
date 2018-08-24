@@ -529,7 +529,7 @@ public:
 	void DrawUP(const void *vdata, int vertexCount) override;
 	void Clear(int mask, uint32_t colorval, float depthVal, int stencilVal);
 
-	uintptr_t GetNativeObject(NativeObject obj) const override {
+	uintptr_t GetNativeObject(NativeObject obj) override {
 		switch (obj) {
 		case NativeObject::CONTEXT:
 			return (uintptr_t)d3d_;
@@ -585,15 +585,26 @@ private:
 
 D3D9Context::D3D9Context(IDirect3D9 *d3d, IDirect3D9Ex *d3dEx, int adapterId, IDirect3DDevice9 *device, IDirect3DDevice9Ex *deviceEx)
 	: d3d_(d3d), d3dEx_(d3dEx), adapterId_(adapterId), device_(device), deviceEx_(deviceEx), caps_{} {
-	CreatePresets();
 	if (FAILED(d3d->GetAdapterIdentifier(adapterId, 0, &identifier_))) {
 		ELOG("Failed to get adapter identifier: %d", adapterId);
 	}
+	switch (identifier_.VendorId) {
+	case 0x10DE: caps_.vendor = GPUVendor::VENDOR_NVIDIA; break;
+	case 0x1002:
+	case 0x1022: caps_.vendor = GPUVendor::VENDOR_AMD; break;
+	case 0x163C:
+	case 0x8086:
+	case 0x8087: caps_.vendor = GPUVendor::VENDOR_INTEL; break;
+	default:
+		caps_.vendor = GPUVendor::VENDOR_UNKNOWN;
+	}
+
 	if (!FAILED(device->GetDeviceCaps(&d3dCaps_))) {
 		sprintf(shadeLangVersion_, "PS: %04x VS: %04x", d3dCaps_.PixelShaderVersion & 0xFFFF, d3dCaps_.VertexShaderVersion & 0xFFFF);
 	} else {
 		strcpy(shadeLangVersion_, "N/A");
 	}
+
 	caps_.multiViewport = false;
 	caps_.anisoSupported = true;
 	caps_.depthRangeMinusOneToOne = false;
@@ -602,6 +613,8 @@ D3D9Context::D3D9Context(IDirect3D9 *d3d, IDirect3D9Ex *d3dEx, int adapterId, ID
 	caps_.tesselationShaderSupported = false;
 	caps_.framebufferBlitSupported = true;
 	caps_.framebufferCopySupported = false;
+	caps_.framebufferDepthBlitSupported = true;
+	caps_.framebufferDepthCopySupported = false;
 	if (d3d) {
 		D3DDISPLAYMODE displayMode;
 		d3d->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &displayMode);
@@ -633,6 +646,11 @@ Pipeline *D3D9Context::CreateGraphicsPipeline(const PipelineDesc &desc) {
 	}
 	D3D9Pipeline *pipeline = new D3D9Pipeline(device_);
 	for (auto iter : desc.shaders) {
+		if (!iter) {
+			ELOG("NULL shader passed to CreateGraphicsPipeline");
+			delete pipeline;
+			return NULL;
+		}
 		if (iter->GetStage() == ShaderStage::FRAGMENT) {
 			pipeline->pshader = static_cast<D3D9ShaderModule *>(iter);
 		}
@@ -919,7 +937,9 @@ void D3D9Context::Clear(int mask, uint32_t colorval, float depthVal, int stencil
 	if (mask & FBChannel::FB_COLOR_BIT) d3dMask |= D3DCLEAR_TARGET;
 	if (mask & FBChannel::FB_DEPTH_BIT) d3dMask |= D3DCLEAR_ZBUFFER;
 	if (mask & FBChannel::FB_STENCIL_BIT) d3dMask |= D3DCLEAR_STENCIL;
-	device_->Clear(0, NULL, d3dMask, (D3DCOLOR)SwapRB(colorval), depthVal, stencilVal);
+	if (d3dMask) {
+		device_->Clear(0, NULL, d3dMask, (D3DCOLOR)SwapRB(colorval), depthVal, stencilVal);
+	}
 }
 
 void D3D9Context::SetScissorRect(int left, int top, int width, int height) {
@@ -947,20 +967,24 @@ void D3D9Context::SetBlendFactor(float color[4]) {
 }
 
 bool D3D9ShaderModule::Compile(LPDIRECT3DDEVICE9 device, const uint8_t *data, size_t size) {
-	LPD3DXMACRO defines = NULL;
-	LPD3DXINCLUDE includes = NULL;
+	LPD3DXMACRO defines = nullptr;
+	LPD3DXINCLUDE includes = nullptr;
 	DWORD flags = 0;
-	LPD3DXBUFFER codeBuffer;
-	LPD3DXBUFFER errorBuffer;
+	LPD3DXBUFFER codeBuffer = nullptr;
+	LPD3DXBUFFER errorBuffer = nullptr;
 	const char *source = (const char *)data;
 	const char *profile = stage_ == ShaderStage::FRAGMENT ? "ps_2_0" : "vs_2_0";
 	HRESULT hr = dyn_D3DXCompileShader(source, (UINT)strlen(source), defines, includes, "main", profile, flags, &codeBuffer, &errorBuffer, nullptr);
 	if (FAILED(hr)) {
-		const char *error = (const char *)errorBuffer->GetBufferPointer();
+		const char *error = errorBuffer ? (const char *)errorBuffer->GetBufferPointer() : "(no errorbuffer returned)";
+		if (hr == ERROR_MOD_NOT_FOUND) {
+			// No D3D9-compatible shader compiler installed.
+			error = "D3D9 shader compiler not installed";
+		}
 		OutputDebugStringA(source);
 		OutputDebugStringA(error);
-		errorBuffer->Release();
-
+		if (errorBuffer)
+			errorBuffer->Release();
 		if (codeBuffer) 
 			codeBuffer->Release();
 		return false;
@@ -1058,7 +1082,10 @@ void D3D9Context::BindFramebufferAsRenderTarget(Framebuffer *fbo, const RenderPa
 		clearFlags |= D3DCLEAR_TARGET;
 	}
 	if (rp.depth == RPAction::CLEAR) {
-		clearFlags |= D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL;
+		clearFlags |= D3DCLEAR_ZBUFFER;
+	}
+	if (rp.stencil == RPAction::CLEAR) {
+		clearFlags |= D3DCLEAR_STENCIL;
 	}
 	if (clearFlags) {
 		dxstate.scissorTest.force(false);
@@ -1118,8 +1145,13 @@ void D3D9Context::BindFramebufferAsTexture(Framebuffer *fbo, int binding, FBChan
 
 void D3D9Context::GetFramebufferDimensions(Framebuffer *fbo, int *w, int *h) {
 	D3D9Framebuffer *fb = (D3D9Framebuffer *)fbo;
-	*w = fb->width;
-	*h = fb->height;
+	if (fb) {
+		*w = fb->width;
+		*h = fb->height;
+	} else {
+		*w = targetWidth_;
+		*h = targetHeight_;
+	}
 }
 
 bool D3D9Context::BlitFramebuffer(Framebuffer *srcfb, int srcX1, int srcY1, int srcX2, int srcY2, Framebuffer *dstfb, int dstX1, int dstY1, int dstX2, int dstY2, int channelBits, FBBlitFilter filter) {

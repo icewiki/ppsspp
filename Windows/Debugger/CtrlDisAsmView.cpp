@@ -183,6 +183,7 @@ CtrlDisAsmView::~CtrlDisAsmView()
 {
 	DeleteObject(font);
 	DeleteObject(boldfont);
+	manager.clear();
 }
 
 COLORREF scaleColor(COLORREF color, float factor)
@@ -200,7 +201,6 @@ COLORREF scaleColor(COLORREF color, float factor)
 
 bool CtrlDisAsmView::getDisasmAddressText(u32 address, char* dest, bool abbreviateLabels, bool showData)
 {
-	auto memLock = Memory::Lock();
 	if (!PSP_IsInited())
 		return false;
 
@@ -228,7 +228,8 @@ bool CtrlDisAsmView::getDisasmAddressText(u32 address, char* dest, bool abbrevia
 		}
 	} else {
 		if (showData) {
-			sprintf(dest, "%08X %08X", address, Memory::Read_Instruction(address, true).encoding);
+			u32 encoding = Memory::IsValidAddress(address) ? Memory::Read_Instruction(address, true).encoding : 0;
+			sprintf(dest, "%08X %08X", address, encoding);
 		} else {
 			sprintf(dest, "%08X", address);
 		}
@@ -467,6 +468,7 @@ void CtrlDisAsmView::drawArguments(HDC hdc, const DisassemblyLineInfo &line, int
 
 void CtrlDisAsmView::onPaint(WPARAM wParam, LPARAM lParam)
 {
+	auto memLock = Memory::Lock();
 	if (!debugger->isAlive()) return;
 
 	PAINTSTRUCT ps;
@@ -1178,6 +1180,7 @@ void CtrlDisAsmView::calculatePixelPositions()
 
 void CtrlDisAsmView::search(bool continueSearch)
 {
+	auto memLock = Memory::Lock();
 	u32 searchAddress;
 
 	if (continueSearch == false || searchQuery[0] == 0)
@@ -1258,6 +1261,7 @@ void CtrlDisAsmView::search(bool continueSearch)
 
 std::string CtrlDisAsmView::disassembleRange(u32 start, u32 size)
 {
+	auto memLock = Memory::Lock();
 	std::string result;
 
 	// gather all branch targets without labels

@@ -395,7 +395,7 @@ void SetDefaultKeyMap(DefaultMaps dmap, bool replace) {
 	UpdateNativeMenuKeys();
 }
 
-const KeyMap_IntStrPair key_names[] = {
+static const KeyMap_IntStrPair key_names[] = {
 	{NKCODE_A, "A"},
 	{NKCODE_B, "B"},
 	{NKCODE_C, "C"},
@@ -586,7 +586,7 @@ const KeyMap_IntStrPair key_names[] = {
 	{NKCODE_RIGHTBRACE, "}"},
 };
 
-const KeyMap_IntStrPair axis_names[] = {
+static const KeyMap_IntStrPair axis_names[] = {
 	{JOYSTICK_AXIS_X, "X Axis"},
 	{JOYSTICK_AXIS_Y, "Y Axis"},
 	{JOYSTICK_AXIS_PRESSURE, "Pressure"},
@@ -645,10 +645,13 @@ const KeyMap_IntStrPair psp_button_names[] = {
 	{VIRTKEY_RAPID_FIRE, "RapidFire"},
 	{VIRTKEY_UNTHROTTLE, "Unthrottle"},
 	{VIRTKEY_SPEED_TOGGLE, "SpeedToggle"},
+	{VIRTKEY_SPEED_CUSTOM1, "Alt speed 1"},
+	{VIRTKEY_SPEED_CUSTOM2, "Alt speed 2"},
 	{VIRTKEY_PAUSE, "Pause"},
 #ifndef MOBILE_DEVICE
 	{VIRTKEY_FRAME_ADVANCE, "Frame Advance"},
 	{VIRTKEY_REWIND, "Rewind"},
+	{VIRTKEY_RECORD, "Audio/Video Recording" },
 #endif
 	{VIRTKEY_SAVE_STATE, "Save State"},
 	{VIRTKEY_LOAD_STATE, "Load State"},
@@ -874,7 +877,7 @@ void LoadFromIni(IniFile &file) {
 	IniFile::Section *controls = file.GetOrCreateSection("ControlMapping");
 	for (size_t i = 0; i < ARRAY_SIZE(psp_button_names); i++) {
 		std::string value;
-		controls->Get(psp_button_names[i].name.c_str(), &value, "");
+		controls->Get(psp_button_names[i].name, &value, "");
 
 		// Erase default mapping
 		g_controllerMap.erase(psp_button_names[i].key);
@@ -913,7 +916,7 @@ void SaveToIni(IniFile &file) {
 				value += ",";
 		}
 
-		controls->Set(psp_button_names[i].name.c_str(), value, "");
+		controls->Set(psp_button_names[i].name, value, "");
 	}
 }
 

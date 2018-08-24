@@ -7,7 +7,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Looper;
 import android.util.Log;
-import android.widget.Toast;
 
 public class PpssppActivity extends NativeActivity {
 	private static final String TAG = "PpssppActivity";
@@ -58,7 +57,6 @@ public class PpssppActivity extends NativeActivity {
 					}
 					Looper.loop();
 				}
-
 			}.start();
 
 			try {
@@ -75,20 +73,23 @@ public class PpssppActivity extends NativeActivity {
 		// using Intent extra string. Intent extra will be null if launch normal
 		// (from app drawer or file explorer).
 		Intent intent = getIntent();
-		String action = intent.getAction();
-		if (Intent.ACTION_VIEW.equals(action)) {
-			Uri data = intent.getData();
-			if (data != null) {
-				String path = intent.getData().getPath();
-				super.setShortcutParam(path);
-				Toast.makeText(getApplicationContext(), path, Toast.LENGTH_SHORT).show();
-			} else {
-				Log.e(TAG, "Got ACTION_VIEW without a valid uri");
-			}
+		// String action = intent.getAction();
+		Uri data = intent.getData();
+		if (data != null) {
+			String path = intent.getData().getPath();
+			Log.i(TAG, "Found Shortcut Parameter in data: " + path);
+			super.setShortcutParam(path);
+			// Toast.makeText(getApplicationContext(), path, Toast.LENGTH_SHORT).show();
 		} else {
-			super.setShortcutParam(getIntent().getStringExtra(SHORTCUT_EXTRA_KEY));
+			String param = getIntent().getStringExtra(SHORTCUT_EXTRA_KEY);
+			Log.e(TAG, "Got ACTION_VIEW without a valid uri, trying param");
+			if (param != null) {
+				Log.i(TAG, "Found Shortcut Parameter in extra-data: " + param);
+				super.setShortcutParam(getIntent().getStringExtra(SHORTCUT_EXTRA_KEY));
+			} else {
+				Log.e(TAG, "Shortcut missing parameter!");
+			}
 		}
-
 		super.onCreate(savedInstanceState);
 	}
 

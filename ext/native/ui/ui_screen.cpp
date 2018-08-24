@@ -33,8 +33,9 @@ void UIScreen::DoRecreateViews() {
 		delete root_;
 		root_ = nullptr;
 		CreateViews();
-		if (root_ && root_->GetDefaultFocusView()) {
-			root_->GetDefaultFocusView()->SetFocus();
+		UI::View *defaultView = root_ ? root_->GetDefaultFocusView() : nullptr;
+		if (defaultView && defaultView->GetVisibility() == UI::V_VISIBLE) {
+			defaultView->SetFocus();
 		}
 		recreateViews_ = false;
 
@@ -60,6 +61,16 @@ void UIScreen::update() {
 	}
 }
 
+void UIScreen::deviceLost() {
+	if (root_)
+		root_->DeviceLost();
+}
+
+void UIScreen::deviceRestored() {
+	if (root_)
+		root_->DeviceRestored(screenManager()->getDrawContext());
+}
+
 void UIScreen::preRender() {
 	using namespace Draw;
 	Draw::DrawContext *draw = screenManager()->getDrawContext();
@@ -67,8 +78,9 @@ void UIScreen::preRender() {
 		return;
 	}
 	draw->BeginFrame();
+	screenManager()->getUIContext()->BeginFrame();
 	// Bind and clear the back buffer
-	draw->BindFramebufferAsRenderTarget(nullptr, { RPAction::CLEAR, RPAction::CLEAR, 0xFF000000 });
+	draw->BindFramebufferAsRenderTarget(nullptr, { RPAction::CLEAR, RPAction::CLEAR, RPAction::CLEAR, 0xFF000000 });
 
 	Draw::Viewport viewport;
 	viewport.TopLeftX = 0;
@@ -160,6 +172,13 @@ bool UIDialogScreen::key(const KeyInput &key) {
 		return true;
 	}
 	return retval;
+}
+
+void UIDialogScreen::sendMessage(const char *msg, const char *value) {
+	Screen *screen = screenManager()->dialogParent(this);
+	if (screen) {
+		screen->sendMessage(msg, value);
+	}
 }
 
 bool UIScreen::axis(const AxisInput &axis) {
@@ -302,6 +321,10 @@ void PopupScreen::TriggerFinish(DialogResult result) {
 	OnCompleted(result);
 }
 
+void PopupScreen::resized() {
+	RecreateViews();
+}
+
 void PopupScreen::CreateViews() {
 	using namespace UI;
 	UIContext &dc = *screenManager()->getUIContext();
@@ -421,6 +444,8 @@ void PopupMultiChoice::Update() {
 }
 
 void PopupMultiChoice::UpdateText() {
+	if (!choices_)
+		return;
 	I18NCategory *category = GetI18NCategory(category_);
 	// Clamp the value to be safe.
 	if (*value_ < minVal_ || *value_ > minVal_ + numChoices_ - 1) {
@@ -443,6 +468,7 @@ void PopupMultiChoice::ChoiceCallback(int num) {
 		if (restoreFocus_) {
 			SetFocusedView(this);
 		}
+		PostChoiceCallback(num);
 	}
 }
 
@@ -490,6 +516,8 @@ EventReturn PopupSliderChoice::HandleClick(EventParams &e) {
 	restoreFocus_ = HasFocus();
 
 	SliderPopupScreen *popupScreen = new SliderPopupScreen(value_, minValue_, maxValue_, ChopTitle(text_), step_, units_);
+	if (!negativeLabel_.empty())
+		popupScreen->SetNegativeDisable(negativeLabel_);
 	popupScreen->OnChange.Handle(this, &PopupSliderChoice::HandleChange);
 	if (e.v)
 		popupScreen->SetPopupOrigin(e.v);
@@ -515,9 +543,12 @@ void PopupSliderChoice::Draw(UIContext &dc) {
 	int paddingX = 12;
 	dc.SetFontStyle(dc.theme->uiFont);
 
-	char temp[32];
+	// Always good to have space for Unicode.
+	char temp[256];
 	if (zeroLabel_.size() && *value_ == 0) {
 		strcpy(temp, zeroLabel_.c_str());
+	} else if (negativeLabel_.size() && *value_ < 0) {
+		strcpy(temp, negativeLabel_.c_str());
 	} else {
 		sprintf(temp, fmt_, *value_);
 	}
@@ -559,7 +590,7 @@ void PopupSliderChoiceFloat::Draw(UIContext &dc) {
 	int paddingX = 12;
 	dc.SetFontStyle(dc.theme->uiFont);
 
-	char temp[32];
+	char temp[256];
 	if (zeroLabel_.size() && *value_ == 0.0f) {
 		strcpy(temp, zeroLabel_.c_str());
 	} else {
@@ -585,6 +616,7 @@ EventReturn SliderPopupScreen::OnDecrease(EventParams &params) {
 	sprintf(temp, "%d", sliderValue_);
 	edit_->SetText(temp);
 	changing_ = false;
+	disabled_ = false;
 	return EVENT_DONE;
 }
 
@@ -599,6 +631,7 @@ EventReturn SliderPopupScreen::OnIncrease(EventParams &params) {
 	sprintf(temp, "%d", sliderValue_);
 	edit_->SetText(temp);
 	changing_ = false;
+	disabled_ = false;
 	return EVENT_DONE;
 }
 
@@ -608,12 +641,14 @@ EventReturn SliderPopupScreen::OnSliderChange(EventParams &params) {
 	sprintf(temp, "%d", sliderValue_);
 	edit_->SetText(temp);
 	changing_ = false;
+	disabled_ = false;
 	return EVENT_DONE;
 }
 
 EventReturn SliderPopupScreen::OnTextChange(EventParams &params) {
 	if (!changing_) {
 		sliderValue_ = atoi(edit_->GetText().c_str());
+		disabled_ = false;
 		slider_->Clamp();
 	}
 	return EVENT_DONE;
@@ -624,6 +659,8 @@ void SliderPopupScreen::CreatePopupContents(UI::ViewGroup *parent) {
 	UIContext &dc = *screenManager()->getUIContext();
 
 	sliderValue_ = *value_;
+	if (disabled_ && sliderValue_ < 0)
+		sliderValue_ = 0;
 	LinearLayout *vert = parent->Add(new LinearLayout(ORIENT_VERTICAL, new LinearLayoutParams(UI::Margins(10, 10))));
 	slider_ = new Slider(&sliderValue_, minValue_, maxValue_, new LinearLayoutParams(UI::Margins(10, 10)));
 	slider_->OnChange.Handle(this, &SliderPopupScreen::OnSliderChange);
@@ -638,12 +675,16 @@ void SliderPopupScreen::CreatePopupContents(UI::ViewGroup *parent) {
 	edit_ = new TextEdit(temp, "", new LinearLayoutParams(10.0f));
 	edit_->SetMaxLen(16);
 	edit_->SetTextColor(dc.theme->popupStyle.fgColor);
+	edit_->SetTextAlign(FLAG_DYNAMIC_ASCII);
 	edit_->OnTextChange.Handle(this, &SliderPopupScreen::OnTextChange);
 	changing_ = false;
 	lin->Add(edit_);
 
 	if (!units_.empty())
 		lin->Add(new TextView(units_, new LinearLayoutParams(10.0f)))->SetTextColor(dc.theme->popupStyle.fgColor);
+
+	if (!negativeLabel_.empty())
+		vert->Add(new CheckBox(&disabled_, negativeLabel_));
 
 	if (IsFocusMovementEnabled())
 		UI::SetFocusedView(slider_);
@@ -668,6 +709,7 @@ void SliderFloatPopupScreen::CreatePopupContents(UI::ViewGroup *parent) {
 	edit_ = new TextEdit(temp, "", new LinearLayoutParams(10.0f));
 	edit_->SetMaxLen(16);
 	edit_->SetTextColor(dc.theme->popupStyle.fgColor);
+	edit_->SetTextAlign(FLAG_DYNAMIC_ASCII);
 	edit_->OnTextChange.Handle(this, &SliderFloatPopupScreen::OnTextChange);
 	changing_ = false;
 	lin->Add(edit_);
@@ -726,7 +768,7 @@ EventReturn SliderFloatPopupScreen::OnTextChange(EventParams &params) {
 
 void SliderPopupScreen::OnCompleted(DialogResult result) {
 	if (result == DR_OK) {
-		*value_ = sliderValue_;
+		*value_ = disabled_ ? -1 : sliderValue_;
 		EventParams e{};
 		e.v = nullptr;
 		e.a = *value_;
@@ -821,7 +863,9 @@ void ChoiceWithValueDisplay::Draw(UIContext &dc) {
 
 	I18NCategory *category = GetI18NCategory(category_);
 	std::ostringstream valueText;
-	if (sValue_ != nullptr) {
+	if (translateCallback_ && sValue_) {
+		valueText << translateCallback_(sValue_->c_str());
+	} else if (sValue_ != nullptr) {
 		if (category)
 			valueText << category->T(*sValue_);
 		else

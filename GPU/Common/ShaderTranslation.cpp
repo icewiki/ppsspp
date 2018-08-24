@@ -17,8 +17,6 @@
 
 #include "ppsspp_config.h"
 
-#if !defined(ANDROID)
-
 #include <memory>
 #include <vector>
 #include <sstream>
@@ -34,6 +32,8 @@
 #include "ShaderTranslation.h"
 #include "ext/glslang/SPIRV/GlslangToSpv.h"
 #include "thin3d/thin3d.h"
+#include "gfx_es2/gpu_features.h"
+
 #include "ext/SPIRV-Cross/spirv.hpp"
 #include "ext/SPIRV-Cross/spirv_common.hpp"
 #include "ext/SPIRV-Cross/spirv_cross.hpp"
@@ -83,7 +83,22 @@ cbuffer data : register(b0) {
 	float2 u_texelDelta;
 	float2 u_pixelDelta;
 	float4 u_time;
-	bool u_video;
+	float u_video;
+};
+)";
+
+static const char *vulkanPrologue =
+R"(#version 430
+#extension GL_ARB_separate_shader_objects : enable
+#extension GL_ARB_shading_language_420pack : enable
+)";
+
+static const char *pushconstantBufferDecl = R"(
+layout(push_constant) uniform data {
+	vec2 u_texelDelta;
+	vec2 u_pixelDelta;
+	vec4 u_time;
+	float u_video;
 };
 )";
 
@@ -112,9 +127,75 @@ std::string Postprocess(std::string code, ShaderLanguage lang, Draw::ShaderStage
 	return output;
 }
 
+bool ConvertToVulkanGLSL(std::string *dest, TranslatedShaderMetadata *destMetadata, std::string src, Draw::ShaderStage stage, std::string *errorMessage) {
+	std::stringstream out;
+
+	static struct {
+		Draw::ShaderStage stage;
+		const char *needle;
+		const char *replacement;
+	} replacements[] = {
+		{ Draw::ShaderStage::VERTEX, "attribute vec4 a_position;", "layout(location = 0) in vec4 a_position;" },
+		{ Draw::ShaderStage::VERTEX, "attribute vec2 a_texcoord0;", "layout(location = 1) in vec2 a_texcoord0;"},
+		{ Draw::ShaderStage::VERTEX, "varying vec2 v_position;", "layout(location = 0) out vec2 v_position;" },
+		{ Draw::ShaderStage::FRAGMENT, "varying vec2 v_position;", "layout(location = 0) in vec2 v_position;" },
+		{ Draw::ShaderStage::FRAGMENT, "texture2D(", "texture(" },
+		{ Draw::ShaderStage::FRAGMENT, "gl_FragColor", "fragColor0" },
+	};
+
+	out << vulkanPrologue;
+	if (stage == Draw::ShaderStage::FRAGMENT) {
+		out << "layout (location = 0) out vec4 fragColor0;\n";
+	}
+	// Output the uniform buffer.
+	out << pushconstantBufferDecl;
+
+	// Alright, now let's go through it line by line and zap the single uniforms
+	// and perform replacements.
+	std::string line;
+	std::stringstream instream(src);
+	while (std::getline(instream, line)) {
+		int vecSize, num;
+		if (line.find("uniform bool") != std::string::npos) {
+			continue;
+		} else if (line.find("uniform sampler2D") == 0) {
+			line = "layout(set = 0, binding = 0) " + line;
+		} else if (line.find("uniform ") != std::string::npos) {
+			continue;
+		} else if (2 == sscanf(line.c_str(), "varying vec%d v_texcoord%d;", &vecSize, &num)) {
+			if (stage == Draw::ShaderStage::FRAGMENT) {
+				line = StringFromFormat("layout(location = %d) in vec%d v_texcoord%d;", num, vecSize, num);
+			} else {
+				line = StringFromFormat("layout(location = %d) out vec%d v_texcoord%d;", num, vecSize, num);
+			}
+		}
+		for (int i = 0; i < ARRAY_SIZE(replacements); i++) {
+			if (replacements[i].stage == stage)
+				line = ReplaceAll(line, replacements[i].needle, replacements[i].replacement);
+		}
+		out << line << "\n";
+	}
+
+	// DUMPLOG(src.c_str());
+	// ILOG("---->");
+	// DUMPLOG(LineNumberString(out.str()).c_str());
+
+	*dest = out.str();
+	return true;
+}
+
 bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShaderMetadata *destMetadata, std::string src, ShaderLanguage srcLang, Draw::ShaderStage stage, std::string *errorMessage) {
 	if (srcLang != GLSL_300 && srcLang != GLSL_140)
 		return false;
+
+	if ((srcLang == GLSL_140 || srcLang == GLSL_300) && destLang == GLSL_VULKAN) {
+		// Let's just mess about at the string level, no need to recompile.
+		bool result = ConvertToVulkanGLSL(dest, destMetadata, src, stage, errorMessage);
+		return result;
+	}
+	if (errorMessage) {
+		*errorMessage = "";
+	}
 
 #if PPSSPP_PLATFORM(UWP)
 	return false;
@@ -126,8 +207,8 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShade
 	TBuiltInResource Resources;
 	init_resources(Resources);
 
-	// Enable SPIR-V and Vulkan rules when parsing GLSL
-	EShMessages messages = EShMessages::EShMsgDefault; // (EShMessages)(EShMsgSpvRules | EShMsgVulkanRules);
+	// Don't enable SPIR-V and Vulkan rules when parsing GLSL. Our postshaders are written in oldschool GLES 2.0.
+	EShMessages messages = EShMessages::EShMsgDefault;
 
 	EShLanguage shaderStage = GetLanguage(stage);
 	glslang::TShader shader(shaderStage);
@@ -161,21 +242,30 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShade
 
 	std::vector<unsigned int> spirv;
 	// Can't fail, parsing worked, "linking" worked.
-	glslang::GlslangToSpv(*program.getIntermediate(shaderStage), spirv);
+	glslang::SpvOptions options;
+	options.disableOptimizer = false;
+	options.optimizeSize = false;
+	options.generateDebugInfo = false;
+	glslang::GlslangToSpv(*program.getIntermediate(shaderStage), spirv, &options);
+
+	// For whatever reason, with our config, the above outputs an invalid SPIR-V version, 0.
+	// Patch it up so spirv-cross accepts it.
+	spirv[1] = glslang::EShTargetSpv_1_0;
+
 
 	// Alright, step 1 done. Now let's take this SPIR-V shader and output in our desired format.
 
 	switch (destLang) {
-	case GLSL_VULKAN:
-		return false;  // TODO
 #ifdef _WIN32
 	case HLSL_DX9:
 	{
 		spirv_cross::CompilerHLSL hlsl(spirv);
 		spirv_cross::CompilerHLSL::Options options{};
-		options.fixup_clipspace = true;
 		options.shader_model = 30;
-		hlsl.set_options(options);
+		spirv_cross::CompilerGLSL::Options options_common{};
+		options_common.vertex.fixup_clipspace = true;
+		hlsl.set_hlsl_options(options);
+		hlsl.set_common_options(options_common);
 		*dest = hlsl.compile();
 		return true;
 	}
@@ -191,9 +281,11 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShade
 			i++;
 		}
 		spirv_cross::CompilerHLSL::Options options{};
-		options.fixup_clipspace = true;
 		options.shader_model = 50;
-		hlsl.set_options(options);
+		spirv_cross::CompilerGLSL::Options options_common{};
+		options_common.vertex.fixup_clipspace = true;
+		hlsl.set_hlsl_options(options);
+		hlsl.set_common_options(options_common);
 		std::string raw = hlsl.compile();
 		*dest = Postprocess(raw, destLang, stage);
 		return true;
@@ -224,9 +316,20 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShade
 		*dest = glsl.compile();
 		return true;
 	}
+	case GLSL_300:
+	{
+		spirv_cross::CompilerGLSL glsl(std::move(spirv));
+		// The SPIR-V is now parsed, and we can perform reflection on it.
+		spirv_cross::ShaderResources resources = glsl.get_shader_resources();
+		// Set some options.
+		spirv_cross::CompilerGLSL::Options options;
+		options.version = gl_extensions.GLSLVersion();
+		glsl.set_options(options);
+		// Compile to GLSL, ready to give to GL driver.
+		*dest = glsl.compile();
+		return true;
+	}
 	default:
 		return false;
 	}
 }
-
-#endif

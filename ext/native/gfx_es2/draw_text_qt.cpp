@@ -23,8 +23,7 @@ TextDrawerQt::~TextDrawerQt() {
 }
 
 uint32_t TextDrawerQt::SetFont(const char *fontName, int size, int flags) {
-	// We will only use the default font
-	uint32_t fontHash = 0; //hash::Fletcher((const uint8_t *)fontName, strlen(fontName));
+	uint32_t fontHash = fontName && strlen(fontName) ? hash::Adler32((const uint8_t *)fontName, strlen(fontName)) : 0;
 	fontHash ^= size;
 	fontHash ^= flags << 10;
 
@@ -34,7 +33,7 @@ uint32_t TextDrawerQt::SetFont(const char *fontName, int size, int flags) {
 		return fontHash;
 	}
 
-	QFont* font = new QFont();
+	QFont* font = fontName ? new QFont(fontName) : new QFont();
 	font->setPixelSize(size + 6);
 	fontMap_[fontHash] = font;
 	fontHash_ = fontHash;
@@ -72,7 +71,7 @@ void TextDrawerQt::DrawString(DrawBuffer &target, const char *str, float x, floa
 	if (!strlen(str))
 		return;
 
-	uint32_t stringHash = hash::Fletcher((const uint8_t *)str, strlen(str));
+	uint32_t stringHash = hash::Adler32((const uint8_t *)str, strlen(str));
 	uint32_t entryHash = stringHash ^ fontHash_ ^ (align << 24);
 
 	target.Flush(true);
@@ -114,6 +113,7 @@ void TextDrawerQt::DrawString(DrawBuffer &target, const char *str, float x, floa
 		desc.height = entry->bmHeight;
 		desc.depth = 1;
 		desc.mipLevels = 1;
+		desc.tag = "TextDrawer";
 
 		uint16_t *bitmapData = new uint16_t[entry->bmWidth * entry->bmHeight];
 		for (int x = 0; x < entry->bmWidth; x++) {
@@ -140,6 +140,12 @@ void TextDrawerQt::ClearCache() {
 	}
 	cache_.clear();
 	sizeCache_.clear();
+	// Also wipe the font map.
+	for (auto iter : fontMap_) {
+		delete iter.second;
+	}
+	fontMap_.clear();
+	fontHash_ = 0;
 }
 
 void TextDrawerQt::DrawStringRect(DrawBuffer &target, const char *str, const Bounds &bounds, uint32_t color, int align) {

@@ -74,7 +74,11 @@ DrawEngineD3D11::DrawEngineD3D11(Draw::DrawContext *draw, ID3D11Device *device, 
 		device_(device),
 		context_(context),
 		vai_(256),
-		inputLayoutMap_(32) {
+		inputLayoutMap_(32),
+		blendCache_(32),
+		blendCache1_(32),
+		depthStencilCache_(64),
+		rasterCache_(4) {
 	device1_ = (ID3D11Device1 *)draw->GetNativeObject(Draw::NativeObject::DEVICE_EX);
 	context1_ = (ID3D11DeviceContext1 *)draw->GetNativeObject(Draw::NativeObject::CONTEXT_EX);
 	decOptions_.expandAllWeightsToFloat = true;
@@ -137,18 +141,22 @@ void DrawEngineD3D11::DestroyDeviceObjects() {
 	delete tessDataTransfer;
 	delete pushVerts_;
 	delete pushInds_;
-	for (auto &depth : depthStencilCache_) {
-		depth.second->Release();
-	}
-	for (auto &blend : blendCache_) {
-		blend.second->Release();
-	}
-	for (auto &blend1 : blendCache1_) {
-		blend1.second->Release();
-	}
-	for (auto &raster : rasterCache_) {
-		raster.second->Release();
-	}
+	depthStencilCache_.Iterate([&](const uint64_t &key, ID3D11DepthStencilState *ds) {
+		ds->Release();
+	});
+	depthStencilCache_.Clear();
+	blendCache_.Iterate([&](const uint64_t &key, ID3D11BlendState *bs) {
+		bs->Release();
+	});
+	blendCache_.Clear();
+	blendCache1_.Iterate([&](const uint64_t &key, ID3D11BlendState1 *bs) {
+		bs->Release();
+	});
+	blendCache1_.Clear();
+	rasterCache_.Iterate([&](const uint32_t &key, ID3D11RasterizerState *rs) {
+		rs->Release();
+	});
+	rasterCache_.Clear();
 }
 
 struct DeclTypeInfo {
@@ -175,8 +183,6 @@ static const DeclTypeInfo VComp[] = {
 	{ DXGI_FORMAT_UNKNOWN, "UNUSED_DEC_U16_2" },	// 	DEC_U16_2,
 	{ DXGI_FORMAT_R16G16B16A16_UNORM	,"D3DDECLTYPE_USHORT4N "}, // DEC_U16_3,
 	{ DXGI_FORMAT_R16G16B16A16_UNORM	,"D3DDECLTYPE_USHORT4N "}, // DEC_U16_4,
-	{ DXGI_FORMAT_UNKNOWN, "UNUSED_DEC_U8A_2"}, // DEC_U8A_2,
-	{ DXGI_FORMAT_UNKNOWN, "UNUSED_DEC_U16A_2" }, // DEC_U16A_2,
 };
 
 static void VertexAttribSetup(D3D11_INPUT_ELEMENT_DESC * VertexElement, u8 fmt, u8 offset, const char *semantic, u8 semantic_index = 0) {
@@ -190,7 +196,7 @@ static void VertexAttribSetup(D3D11_INPUT_ELEMENT_DESC * VertexElement, u8 fmt, 
 ID3D11InputLayout *DrawEngineD3D11::SetupDecFmtForDraw(D3D11VertexShader *vshader, const DecVtxFormat &decFmt, u32 pspFmt) {
 	// TODO: Instead of one for each vshader, we can reduce it to one for each type of shader
 	// that reads TEXCOORD or not, etc. Not sure if worth it.
-	InputLayoutKey key{ vshader, pspFmt };
+	InputLayoutKey key{ vshader, decFmt.id };
 	ID3D11InputLayout *inputLayout = inputLayoutMap_.Get(key);
 	if (inputLayout) {
 		return inputLayout;
@@ -251,104 +257,6 @@ ID3D11InputLayout *DrawEngineD3D11::SetupDecFmtForDraw(D3D11VertexShader *vshade
 	}
 }
 
-void DrawEngineD3D11::SetupVertexDecoder(u32 vertType) {
-	SetupVertexDecoderInternal(vertType);
-}
-
-inline void DrawEngineD3D11::SetupVertexDecoderInternal(u32 vertType) {
-	// As the decoder depends on the UVGenMode when we use UV prescale, we simply mash it
-	// into the top of the verttype where there are unused bits.
-	const u32 vertTypeID = (vertType & 0xFFFFFF) | (gstate.getUVGenMode() << 24);
-
-	// If vtype has changed, setup the vertex decoder.
-	if (vertTypeID != lastVType_) {
-		dec_ = GetVertexDecoder(vertTypeID);
-		lastVType_ = vertTypeID;
-	}
-}
-
-void DrawEngineD3D11::SubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int *bytesRead) {
-	if (!indexGen.PrimCompatible(prevPrim_, prim) || numDrawCalls >= MAX_DEFERRED_DRAW_CALLS || vertexCountInDrawCalls_ + vertexCount > VERTEX_BUFFER_MAX)
-		Flush();
-
-	// TODO: Is this the right thing to do?
-	if (prim == GE_PRIM_KEEP_PREVIOUS) {
-		prim = prevPrim_ != GE_PRIM_INVALID ? prevPrim_ : GE_PRIM_POINTS;
-	} else {
-		prevPrim_ = prim;
-	}
-
-	SetupVertexDecoderInternal(vertType);
-
-	*bytesRead = vertexCount * dec_->VertexSize();
-
-	if ((vertexCount < 2 && prim > 0) || (vertexCount < 3 && prim > 2 && prim != GE_PRIM_RECTANGLES))
-		return;
-
-	DeferredDrawCall &dc = drawCalls[numDrawCalls];
-	dc.verts = verts;
-	dc.inds = inds;
-	dc.vertType = vertType;
-	dc.indexType = (vertType & GE_VTYPE_IDX_MASK) >> GE_VTYPE_IDX_SHIFT;
-	dc.prim = prim;
-	dc.vertexCount = vertexCount;
-
-	if (g_Config.bVertexCache) {
-		u32 dhash = dcid_;
-		dhash ^= (u32)(uintptr_t)verts;
-		dhash = __rotl(dhash, 13);
-		dhash ^= (u32)(uintptr_t)inds;
-		dhash = __rotl(dhash, 13);
-		dhash ^= (u32)vertType;
-		dhash = __rotl(dhash, 13);
-		dhash ^= (u32)vertexCount;
-		dhash = __rotl(dhash, 13);
-		dhash ^= (u32)prim;
-		dcid_ = dhash;
-	}
-
-	if (inds) {
-		GetIndexBounds(inds, vertexCount, vertType, &dc.indexLowerBound, &dc.indexUpperBound);
-	} else {
-		dc.indexLowerBound = 0;
-		dc.indexUpperBound = vertexCount - 1;
-	}
-
-	uvScale[numDrawCalls] = gstate_c.uv;
-
-	numDrawCalls++;
-	vertexCountInDrawCalls_ += vertexCount;
-
-	if (g_Config.bSoftwareSkinning && (vertType & GE_VTYPE_WEIGHT_MASK)) {
-		DecodeVertsStep(decoded, decodeCounter_, decodedVerts_);
-		decodeCounter_++;
-	}
-
-	if (prim == GE_PRIM_RECTANGLES && (gstate.getTextureAddress(0) & 0x3FFFFFFF) == (gstate.getFrameBufAddress() & 0x3FFFFFFF)) {
-		// Rendertarget == texture?
-		if (!g_Config.bDisableSlowFramebufEffects) {
-			gstate_c.Dirty(DIRTY_TEXTURE_PARAMS);
-			Flush();
-		}
-	}
-}
-
-void DrawEngineD3D11::DecodeVerts() {
-	const UVScale origUV = gstate_c.uv;
-	for (; decodeCounter_ < numDrawCalls; decodeCounter_++) {
-		gstate_c.uv = uvScale[decodeCounter_];
-		DecodeVertsStep(decoded, decodeCounter_, decodedVerts_);
-	}
-	gstate_c.uv = origUV;
-
-	// Sanity check
-	if (indexGen.Prim() < 0) {
-		ERROR_LOG_REPORT(G3D, "DecodeVerts: Failed to deduce prim: %i", indexGen.Prim());
-		// Force to points (0)
-		indexGen.AddPrim(GE_PRIM_POINTS, 0);
-	}
-}
-
 void DrawEngineD3D11::MarkUnreliable(VertexArrayInfoD3D11 *vai) {
 	vai->status = VertexArrayInfoD3D11::VAI_UNRELIABLE;
 	if (vai->vbo) {
@@ -387,6 +295,7 @@ void DrawEngineD3D11::BeginFrame() {
 			vai_.Remove(hash);
 		}
 	});
+	vai_.Maintain();
 
 	// Enable if you want to see vertex decoders in the log output. Need a better way.
 #if 0
@@ -416,13 +325,15 @@ void DrawEngineD3D11::DoFlush() {
 	gpuStats.numFlushes++;
 	gpuStats.numTrackedVertexArrays = (int)vai_.size();
 
-	// This is not done on every drawcall, we should collect vertex data
+	// This is not done on every drawcall, we collect vertex data
 	// until critical state changes. That's when we draw (flush).
 
 	GEPrimitiveType prim = prevPrim_;
 	ApplyDrawState(prim);
 
-	bool useHWTransform = CanUseHardwareTransform(prim);
+	// Always use software for flat shading to fix the provoking index.
+	bool tess = gstate_c.bezier || gstate_c.spline;
+	bool useHWTransform = CanUseHardwareTransform(prim) && (tess || gstate.getShadeMode() != GE_SHADE_FLAT);
 
 	if (useHWTransform) {
 		ID3D11Buffer *vb_ = nullptr;
@@ -456,7 +367,7 @@ void DrawEngineD3D11::DoFlush() {
 					vai->minihash = ComputeMiniHash();
 					vai->status = VertexArrayInfoD3D11::VAI_HASHING;
 					vai->drawsUntilNextFullHash = 0;
-					DecodeVerts(); // writes to indexGen
+					DecodeVerts(decoded); // writes to indexGen
 					vai->numVerts = indexGen.VertexCount();
 					vai->prim = indexGen.Prim();
 					vai->maxIndex = indexGen.MaxIndex();
@@ -481,7 +392,7 @@ void DrawEngineD3D11::DoFlush() {
 						}
 						if (newMiniHash != vai->minihash || newHash != vai->hash) {
 							MarkUnreliable(vai);
-							DecodeVerts();
+							DecodeVerts(decoded);
 							goto rotateVBO;
 						}
 						if (vai->numVerts > 64) {
@@ -500,13 +411,13 @@ void DrawEngineD3D11::DoFlush() {
 						u32 newMiniHash = ComputeMiniHash();
 						if (newMiniHash != vai->minihash) {
 							MarkUnreliable(vai);
-							DecodeVerts();
+							DecodeVerts(decoded);
 							goto rotateVBO;
 						}
 					}
 
 					if (vai->vbo == 0) {
-						DecodeVerts();
+						DecodeVerts(decoded);
 						vai->numVerts = indexGen.VertexCount();
 						vai->prim = indexGen.Prim();
 						vai->maxIndex = indexGen.MaxIndex();
@@ -572,14 +483,14 @@ void DrawEngineD3D11::DoFlush() {
 					if (vai->lastFrame != gpuStats.numFlips) {
 						vai->numFrames++;
 					}
-					DecodeVerts();
+					DecodeVerts(decoded);
 					goto rotateVBO;
 				}
 			}
 
 			vai->lastFrame = gpuStats.numFlips;
 		} else {
-			DecodeVerts();
+			DecodeVerts(decoded);
 rotateVBO:
 			gpuStats.numUncachedVertsDrawn += indexGen.VertexCount();
 			useElements = !indexGen.SeenOnlyPurePrims() || prim == GE_PRIM_TRIANGLE_FAN;
@@ -629,7 +540,7 @@ rotateVBO:
 				memcpy(iptr, decIndex, iSize);
 				pushInds_->EndPush(context_);
 				context_->IASetIndexBuffer(pushInds_->Buf(), DXGI_FORMAT_R16_UINT, iOffset);
-				if (gstate_c.bezier || gstate_c.spline)
+				if (tess)
 					context_->DrawIndexedInstanced(vertexCount, numPatches, 0, 0, 0);
 				else
 					context_->DrawIndexed(vertexCount, 0, 0);
@@ -641,7 +552,7 @@ rotateVBO:
 			context_->IASetVertexBuffers(0, 1, &vb_, &stride, &offset);
 			if (useElements) {
 				context_->IASetIndexBuffer(ib_, DXGI_FORMAT_R16_UINT, 0);
-				if (gstate_c.bezier || gstate_c.spline)
+				if (tess)
 					context_->DrawIndexedInstanced(vertexCount, numPatches, 0, 0, 0);
 				else
 					context_->DrawIndexed(vertexCount, 0, 0);
@@ -650,7 +561,7 @@ rotateVBO:
 			}
 		}
 	} else {
-		DecodeVerts();
+		DecodeVerts(decoded);
 		bool hasColor = (lastVType_ & GE_VTYPE_COL_MASK) != GE_VTYPE_COL_NONE;
 		if (gstate.isModeThrough()) {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && (hasColor || gstate.getMaterialAmbientA() == 255);
@@ -669,17 +580,16 @@ rotateVBO:
 		bool drawIndexed = false;
 		u16 *inds = decIndex;
 		TransformedVertex *drawBuffer = NULL;
-		SoftwareTransformResult result;
-		memset(&result, 0, sizeof(result));
-
-		SoftwareTransformParams params;
-		memset(&params, 0, sizeof(params));
+		SoftwareTransformResult result{};
+		SoftwareTransformParams params{};
 		params.decoded = decoded;
 		params.transformed = transformed;
 		params.transformedExpanded = transformedExpanded;
 		params.fbman = framebufferManager_;
 		params.texCache = textureCache_;
+		params.allowClear = true;
 		params.allowSeparateAlphaClear = false;  // D3D11 doesn't support separate alpha clears
+		params.provokeFlatFirst = true;
 
 		int maxIndex = indexGen.MaxIndex();
 		SoftwareTransform(
@@ -786,75 +696,38 @@ rotateVBO:
 #endif
 }
 
-bool DrawEngineD3D11::IsCodePtrVertexDecoder(const u8 *ptr) const {
-	return decJitCache_->IsInSpace(ptr);
+void DrawEngineD3D11::TessellationDataTransferD3D11::PrepareBuffers(float *&pos, float *&tex, float *&col, int &posStride, int &texStride, int &colStride, int size, bool hasColor, bool hasTexCoords) {
+	struct TessData {
+		float pos[3]; float pad1;
+		float uv[2]; float pad2[2];
+		float color[4];
+	};
+
+	if (prevSize < size) {
+		prevSize = size;
+		if (buf) {
+			buf->Release();
+			view->Release();
+		}
+		desc.ByteWidth = size * sizeof(TessData);
+		desc.StructureByteStride = sizeof(TessData);
+
+		device_->CreateBuffer(&desc, nullptr, &buf);
+		device_->CreateShaderResourceView(buf, 0, &view);
+		context_->VSSetShaderResources(0, 1, &view);
+	}
+	D3D11_MAPPED_SUBRESOURCE map;
+	context_->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+	uint8_t *data = (uint8_t *)map.pData;
+
+	pos = (float *)(data);
+	tex = (float *)(data + offsetof(TessData, uv));
+	col = (float *)(data + offsetof(TessData, color));
+	posStride = sizeof(TessData) / sizeof(float);
+	colStride = hasColor ? (sizeof(TessData) / sizeof(float)) : 0;
+	texStride = sizeof(TessData) / sizeof(float);
 }
 
 void DrawEngineD3D11::TessellationDataTransferD3D11::SendDataToShader(const float * pos, const float * tex, const float * col, int size, bool hasColor, bool hasTexCoords) {
-	// Position
-	if (prevSize < size) {
-		prevSize = size;
-		if (data_tex[0]) {
-			data_tex[0]->Release();
-			view[0]->Release();
-		}
-		desc.Width = size;
-		desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-		HRESULT hr = device_->CreateTexture1D(&desc, nullptr, &data_tex[0]);
-		if (FAILED(hr)) {
-			INFO_LOG(G3D, "Failed to create D3D texture for HW tessellation");
-			data_tex[0]->Release();
-			return; // TODO: Turn off HW tessellation if texture creation error occured.
-		}
-		hr = device_->CreateShaderResourceView(data_tex[0], nullptr, &view[0]);
-		ASSERT_SUCCESS(hr);
-		context_->VSSetShaderResources(0, 1, &view[0]);
-	}
-	dstBox.right = size;
-	context_->UpdateSubresource(data_tex[0], 0, &dstBox, pos, 0, 0);
-
-	// Texcoords
-	if (hasTexCoords) {
-		if (prevSizeTex < size) {
-			prevSizeTex = size;
-			if (data_tex[1]) {
-				data_tex[1]->Release();
-				view[1]->Release();
-			}
-			desc.Width = size;
-			desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-			HRESULT hr = device_->CreateTexture1D(&desc, nullptr, &data_tex[1]);
-			if (FAILED(hr)) {
-				INFO_LOG(G3D, "Failed to create D3D texture for HW tessellation");
-				data_tex[1]->Release();
-				return;
-			}
-			hr = device_->CreateShaderResourceView(data_tex[1], nullptr, &view[1]);
-			context_->VSSetShaderResources(1, 1, &view[1]);
-		}
-		dstBox.right = size;
-		context_->UpdateSubresource(data_tex[1], 0, &dstBox, tex, 0, 0);
-	}
-
-	// Color
-	int sizeColor = hasColor ? size : 1;
-	if (prevSizeCol < sizeColor) {
-		prevSizeCol = sizeColor;
-		if (data_tex[2]) {
-			data_tex[2]->Release();
-			view[2]->Release();
-		}
-		desc.Width = sizeColor;
-		desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-		HRESULT hr = device_->CreateTexture1D(&desc, nullptr, &data_tex[2]);
-		if (FAILED(hr)) {
-			INFO_LOG(G3D, "Failed to create D3D texture for HW tessellation");
-			data_tex[2]->Release();
-			return;
-		}
-		hr = device_->CreateShaderResourceView(data_tex[2], nullptr, &view[2]);
-		context_->VSSetShaderResources(2, 1, &view[2]);
-	}
-	dstBox.right = sizeColor;
-	context_->UpdateSubresource(data_tex[2], 0, &dstBox, col, 0, 0);
+	context_->Unmap(buf, 0);
 }

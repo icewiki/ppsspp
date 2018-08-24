@@ -42,6 +42,7 @@
 #include "Common/StringUtils.h"
 #include "Core/Core.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/CoreParameter.h"
 #include "Core/System.h"
 #include "Core/Debugger/SymbolMap.h"
@@ -114,16 +115,16 @@ void WindowsHost::UpdateConsolePosition() {
 bool WindowsHost::InitGraphics(std::string *error_message, GraphicsContext **ctx) {
 	WindowsGraphicsContext *graphicsContext = nullptr;
 	switch (g_Config.iGPUBackend) {
-	case GPU_BACKEND_OPENGL:
+	case (int)GPUBackend::OPENGL:
 		graphicsContext = new WindowsGLContext();
 		break;
-	case GPU_BACKEND_DIRECT3D9:
+	case (int)GPUBackend::DIRECT3D9:
 		graphicsContext = new D3D9Context();
 		break;
-	case GPU_BACKEND_DIRECT3D11:
+	case (int)GPUBackend::DIRECT3D11:
 		graphicsContext = new D3D11Context();
 		break;
-	case GPU_BACKEND_VULKAN:
+	case (int)GPUBackend::VULKAN:
 		graphicsContext = new WindowsVulkanContext();
 		break;
 	default:
@@ -159,6 +160,9 @@ void WindowsHost::SetWindowTitle(const char *message) {
 		winTitle.append(ConvertUTF8ToWString(" - "));
 		winTitle.append(ConvertUTF8ToWString(message));
 	}
+#ifdef _DEBUG
+	winTitle.append(L" (debug)");
+#endif
 
 	MainWindow::SetWindowTitle(winTitle.c_str());
 	PostMessage(mainWindow_, MainWindow::WM_USER_WINDOW_TITLE_CHANGED, 0, 0);
@@ -241,10 +245,9 @@ void WindowsHost::BootDone() {
 	PostMessage(mainWindow_, WM_USER + 1, 0, 0);
 
 	SetDebugMode(!g_Config.bAutoRun);
-	Core_EnableStepping(!g_Config.bAutoRun);
 }
 
-static std::string SymbolMapFilename(const char *currentFilename, char* ext) {
+static std::string SymbolMapFilename(const char *currentFilename, const char* ext) {
 	FileInfo info;
 
 	std::string result = currentFilename;
@@ -253,9 +256,9 @@ static std::string SymbolMapFilename(const char *currentFilename, char* ext) {
 	getFileInfo(currentFilename, &info);
 	if (info.isDirectory) {
 #ifdef _WIN32
-		char* slash = "\\";
+		const char* slash = "\\";
 #else
-		char* slash = "/";
+		const char* slash = "/";
 #endif
 		if (!endsWith(result,slash))
 			result += slash;
@@ -367,4 +370,8 @@ void WindowsHost::ToggleDebugConsoleVisibility() {
 
 void WindowsHost::NotifyUserMessage(const std::string &message, float duration, u32 color, const char *id) {
 	osm.Show(message, duration, color, -1, true, id);
+}
+
+void WindowsHost::SendUIMessage(const std::string &message, const std::string &value) {
+	NativeMessageReceived(message.c_str(), value.c_str());
 }

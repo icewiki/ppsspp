@@ -52,6 +52,8 @@ class SoftGPU : public GPUCommon {
 public:
 	SoftGPU(GraphicsContext *gfxCtx, Draw::DrawContext *_thin3D);
 	~SoftGPU();
+
+	void CheckGPUFeatures() override {}
 	void InitClear() override {}
 	void ExecuteOp(u32 op, u32 diff) override;
 
@@ -94,12 +96,9 @@ public:
 
 protected:
 	void FastRunLoop(DisplayList &list) override;
-	void ProcessEvent(GPUEvent ev) override;
 	void CopyToCurrentFboFromDisplayRam(int srcwidth, int srcheight);
 
 private:
-	void CopyDisplayToOutputInternal() override;
-
 	bool framebufferDirty_;
 	u32 displayFramebuf_;
 	u32 displayStride_;

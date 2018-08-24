@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <cstring>
 #include "Common/Hashmaps.h"
 
 #include "GPU/Common/VertexDecoderCommon.h"
@@ -40,10 +41,10 @@ enum class PspAttributeLocation {
 struct VulkanPipelineKey {
 	VulkanPipelineRasterStateKey raster;  // prim is included here
 	VkRenderPass renderPass;
-	bool useHWTransform;
-	const VertexDecoder *vtxDec;
 	VkShaderModule vShader;
 	VkShaderModule fShader;
+	uint32_t vtxFmtId;
+	bool useHWTransform;
 
 	void ToString(std::string *str) const {
 		str->resize(sizeof(*this));
@@ -52,33 +53,41 @@ struct VulkanPipelineKey {
 	void FromString(const std::string &str) {
 		memcpy(this, &str[0], sizeof(*this));
 	}
+	std::string GetDescription(DebugShaderStringType stringType) const;
 };
 
-enum {
-	UB_VS_FS_BASE = (1 << 0),
-	UB_VS_BONES = (1 << 1),
-	UB_VS_LIGHTS = (1 << 2),
+enum PipelineFlags {
+	PIPELINE_FLAG_USES_LINES = (1 << 2),
+	PIPELINE_FLAG_USES_BLEND_CONSTANT = (1 << 3),
 };
 
 // Simply wraps a Vulkan pipeline, providing some metadata.
 struct VulkanPipeline {
 	VkPipeline pipeline;
-	int uniformBlocks;  // UB_ enum above.
+	int flags;  // PipelineFlags enum above.
+
+	// Convenience.
+	bool UsesBlendConstant() const { return (flags & PIPELINE_FLAG_USES_BLEND_CONSTANT) != 0; }
+	bool UsesLines() const { return (flags & PIPELINE_FLAG_USES_LINES) != 0; }
 };
 
 class VulkanContext;
 class VulkanVertexShader;
 class VulkanFragmentShader;
+class ShaderManagerVulkan;
+class DrawEngineCommon;
 
 class PipelineManagerVulkan {
 public:
 	PipelineManagerVulkan(VulkanContext *ctx);
 	~PipelineManagerVulkan();
 
-	VulkanPipeline *GetOrCreatePipeline(VkPipelineLayout layout, VkRenderPass renderPass, const VulkanPipelineRasterStateKey &rasterKey, const VertexDecoder *vtxDec, VulkanVertexShader *vs, VulkanFragmentShader *fs, bool useHwTransform);
+	VulkanPipeline *GetOrCreatePipeline(VkPipelineLayout layout, VkRenderPass renderPass, const VulkanPipelineRasterStateKey &rasterKey, const DecVtxFormat *decFmt, VulkanVertexShader *vs, VulkanFragmentShader *fs, bool useHwTransform);
 	int GetNumPipelines() const { return (int)pipelines_.size(); }
 
 	void Clear();
+
+	void SetLineWidth(float lw);
 
 	void DeviceLost();
 	void DeviceRestore(VulkanContext *vulkan);
@@ -86,8 +95,13 @@ public:
 	std::string DebugGetObjectString(std::string id, DebugShaderType type, DebugShaderStringType stringType);
 	std::vector<std::string> DebugGetObjectIDs(DebugShaderType type);
 
+	// Saves data for faster creation next time.
+	void SaveCache(FILE *file, bool saveRawPipelineCache, ShaderManagerVulkan *shaderManager, Draw::DrawContext *drawContext);
+	bool LoadCache(FILE *file, bool loadRawPipelineCache, ShaderManagerVulkan *shaderManager, Draw::DrawContext *drawContext, VkPipelineLayout layout);
+
 private:
 	DenseHashMap<VulkanPipelineKey, VulkanPipeline *, nullptr> pipelines_;
-	VkPipelineCache pipelineCache_;
+	VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
 	VulkanContext *vulkan_;
+	float lineWidth_ = 1.0f;
 };

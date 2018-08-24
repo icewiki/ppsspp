@@ -17,19 +17,16 @@
 
 #include <algorithm>
 #include <thread>
+#include <mutex>
 
 #include "base/timeutil.h"
-#include "ext/vjson/json.h"
-#include "file/fd_util.h"
 #include "i18n/i18n.h"
+#include "json/json_reader.h"
 #include "net/http_client.h"
-#include "net/http_server.h"
 #include "net/resolve.h"
-#include "net/sinks.h"
-#include "thread/threadutil.h"
 #include "Common/Common.h"
-#include "Common/FileUtil.h"
 #include "Core/Config.h"
+#include "Core/WebServer.h"
 #include "UI/RemoteISOScreen.h"
 
 using namespace UI;
@@ -37,154 +34,8 @@ using namespace UI;
 static const char *REPORT_HOSTNAME = "report.ppsspp.org";
 static const int REPORT_PORT = 80;
 
-enum class ServerStatus {
-	STOPPED,
-	STARTING,
-	RUNNING,
-	STOPPING,
-};
-
-static std::thread *serverThread = nullptr;
-static ServerStatus serverStatus;
-static std::mutex serverStatusLock;
-static std::condition_variable serverStatusCond;
-
 static bool scanCancelled = false;
 static bool scanAborted = false;
-
-static void UpdateStatus(ServerStatus s) {
-	std::lock_guard<std::mutex> guard(serverStatusLock);
-	serverStatus = s;
-	serverStatusCond.notify_one();
-}
-
-static ServerStatus RetrieveStatus() {
-	std::lock_guard<std::mutex> guard(serverStatusLock);
-	return serverStatus;
-}
-
-// This reports the local IP address to report.ppsspp.org, which can then
-// relay that address to a mobile device searching for the server.
-static void RegisterServer(int port) {
-	http::Client http;
-	Buffer theVoid;
-
-	if (http.Resolve(REPORT_HOSTNAME, REPORT_PORT)) {
-		if (http.Connect(2, 20.0, &scanCancelled)) {
-			char resource[1024] = {};
-			std::string ip = fd_util::GetLocalIP(http.sock());
-			snprintf(resource, sizeof(resource) - 1, "/match/update?local=%s&port=%d", ip.c_str(), port);
-
-			http.GET(resource, &theVoid);
-			http.Disconnect();
-		}
-	}
-}
-
-static void ExecuteServer() {
-	setCurrentThreadName("HTTPServer");
-
-	auto http = new http::Server(new threading::SameThreadExecutor());
-
-	std::map<std::string, std::string> paths;
-	for (std::string filename : g_Config.recentIsos) {
-#ifdef _WIN32
-		static const std::string sep = "\\/";
-#else
-		static const std::string sep = "/";
-#endif
-		size_t basepos = filename.find_last_of(sep);
-		std::string basename = "/" + (basepos == filename.npos ? filename : filename.substr(basepos + 1));
-
-		// Let's not serve directories, since they won't work.  Only single files.
-		// Maybe can do PBPs and other files later.  Would be neat to stream virtual disc filesystems.
-		if (endsWithNoCase(basename, ".cso") || endsWithNoCase(basename, ".iso")) {
-			paths[ReplaceAll(basename, " ", "%20")] = filename;
-		}
-	}
-
-	auto handler = [&](const http::Request &request) {
-		std::string filename = paths[request.resource()];
-		s64 sz = File::GetFileSize(filename);
-
-		std::string range;
-		if (request.Method() == http::RequestHeader::HEAD) {
-			request.WriteHttpResponseHeader(200, sz, "application/octet-stream", "Accept-Ranges: bytes\r\n");
-		} else if (request.GetHeader("range", &range)) {
-			s64 begin = 0, last = 0;
-			if (sscanf(range.c_str(), "bytes=%lld-%lld", &begin, &last) != 2) {
-				request.WriteHttpResponseHeader(400, -1, "text/plain");
-				request.Out()->Push("Could not understand range request.");
-				return;
-			}
-
-			if (begin < 0 || begin > last || last >= sz) {
-				request.WriteHttpResponseHeader(416, -1, "text/plain");
-				request.Out()->Push("Range goes outside of file.");
-				return;
-			}
-
-			FILE *fp = File::OpenCFile(filename, "rb");
-			if (!fp || fseek(fp, begin, SEEK_SET) != 0) {
-				request.WriteHttpResponseHeader(500, -1, "text/plain");
-				request.Out()->Push("File access failed.");
-				if (fp) {
-					fclose(fp);
-				}
-				return;
-			}
-
-			s64 len = last - begin + 1;
-			char contentRange[1024];
-			sprintf(contentRange, "Content-Range: bytes %lld-%lld/%lld\r\n", begin, last, sz);
-			request.WriteHttpResponseHeader(206, len, "application/octet-stream", contentRange);
-
-			const size_t CHUNK_SIZE = 16 * 1024;
-			char *buf = new char[CHUNK_SIZE];
-			for (s64 pos = 0; pos < len; pos += CHUNK_SIZE) {
-				s64 chunklen = std::min(len - pos, (s64)CHUNK_SIZE);
-				fread(buf, chunklen, 1, fp);
-				request.Out()->Push(buf, chunklen);
-			}
-			fclose(fp);
-			delete [] buf;
-			request.Out()->Flush();
-		} else {
-			request.WriteHttpResponseHeader(418, -1, "text/plain");
-			request.Out()->Push("This server only supports range requests.");
-		}
-	};
-
-	for (auto pair : paths) {
-		http->RegisterHandler(pair.first.c_str(), handler);
-	}
-
-	if (!http->Listen(g_Config.iRemoteISOPort)) {
-		if (!http->Listen(0)) {
-			ERROR_LOG(FILESYS, "Unable to listen on any port");
-			UpdateStatus(ServerStatus::STOPPED);
-			return;
-		}
-	}
-	UpdateStatus(ServerStatus::RUNNING);
-
-	g_Config.iRemoteISOPort = http->Port();
-	RegisterServer(http->Port());
-	double lastRegister = real_time_now();
-	while (RetrieveStatus() == ServerStatus::RUNNING) {
-		http->RunSlice(5.0);
-
-		double now = real_time_now();
-		if (now > lastRegister + 540.0) {
-			RegisterServer(http->Port());
-			lastRegister = now;
-		}
-	}
-
-	http->Stop();
-
-	UpdateStatus(ServerStatus::STOPPED);
-}
 
 static bool FindServer(std::string &resultHost, int &resultPort) {
 	http::Client http;
@@ -231,21 +82,26 @@ static bool FindServer(std::string &resultHost, int &resultPort) {
 	std::string json;
 	result.TakeAll(&json);
 
+	using namespace json;
+
 	JsonReader reader(json.c_str(), json.size());
 	if (!reader.ok()) {
 		return false;
 	}
 
-	const json_value *entries = reader.root();
-	if (!entries) {
+	const JsonValue entries = reader.rootArray();
+	if (entries.getTag() != JSON_ARRAY) {
 		return false;
 	}
 
 	std::vector<std::string> servers;
-	const json_value *entry = entries->first_child;
-	while (entry && !scanCancelled) {
-		const char *host = entry->getString("ip", "");
-		int port = entry->getInt("p", 0);
+	for (const auto pentry : entries) {
+		JsonGet entry = pentry->value;
+		if (scanCancelled)
+			return false;
+
+		const char *host = entry.getString("ip", "");
+		int port = entry.getInt("p", 0);
 
 		char url[1024] = {};
 		snprintf(url, sizeof(url), "http://%s:%d", host, port);
@@ -254,8 +110,6 @@ static bool FindServer(std::string &resultHost, int &resultPort) {
 		if (TryServer(host, port)) {
 			return true;
 		}
-
-		entry = entry->next_sibling;
 	}
 
 	// None of the local IPs were reachable.
@@ -355,11 +209,8 @@ RemoteISOScreen::RemoteISOScreen() : serverRunning_(false), serverStopping_(fals
 void RemoteISOScreen::update() {
 	UIScreenWithBackground::update();
 
-	bool nowRunning = RetrieveStatus() != ServerStatus::STOPPED;
+	bool nowRunning = !WebServerStopped(WebServerFlags::DISCS);
 	if (serverStopping_ && !nowRunning) {
-		// Server stopped, delete the thread.
-		delete serverThread;
-		serverThread = nullptr;
 		serverStopping_ = false;
 	}
 
@@ -386,11 +237,10 @@ void RemoteISOScreen::CreateViews() {
 	rightColumnItems->SetSpacing(0.0f);
 	Choice *browseChoice = new Choice(ri->T("Browse Games"));
 	rightColumnItems->Add(browseChoice)->OnClick.Handle(this, &RemoteISOScreen::HandleBrowse);
-	ServerStatus status = RetrieveStatus();
-	if (status == ServerStatus::STOPPING) {
+	if (WebServerStopping(WebServerFlags::DISCS)) {
 		rightColumnItems->Add(new Choice(ri->T("Stopping..")))->SetDisabledPtr(&serverStopping_);
 		browseChoice->SetEnabled(false);
-	} else if (status != ServerStatus::STOPPED) {
+	} else if (!WebServerStopped(WebServerFlags::DISCS)) {
 		rightColumnItems->Add(new Choice(ri->T("Stop Sharing")))->OnClick.Handle(this, &RemoteISOScreen::HandleStopServer);
 		browseChoice->SetEnabled(false);
 	} else {
@@ -412,27 +262,18 @@ void RemoteISOScreen::CreateViews() {
 }
 
 UI::EventReturn RemoteISOScreen::HandleStartServer(UI::EventParams &e) {
-	std::lock_guard<std::mutex> guard(serverStatusLock);
-
-	if (serverStatus != ServerStatus::STOPPED) {
+	if (!StartWebServer(WebServerFlags::DISCS)) {
 		return EVENT_SKIPPED;
 	}
-
-	serverStatus = ServerStatus::STARTING;
-	serverThread = new std::thread(&ExecuteServer);
-	serverThread->detach();
 
 	return EVENT_DONE;
 }
 
 UI::EventReturn RemoteISOScreen::HandleStopServer(UI::EventParams &e) {
-	std::lock_guard<std::mutex> guard(serverStatusLock);
-
-	if (serverStatus != ServerStatus::RUNNING) {
+	if (!StopWebServer(WebServerFlags::DISCS)) {
 		return EVENT_SKIPPED;
 	}
 
-	serverStatus = ServerStatus::STOPPING;
 	serverStopping_ = true;
 	RecreateViews();
 
@@ -651,13 +492,13 @@ void RemoteISOBrowseScreen::CreateViews() {
 }
 
 RemoteISOSettingsScreen::RemoteISOSettingsScreen() {
-	serverRunning_ = RetrieveStatus() != ServerStatus::STOPPED;;
+	serverRunning_ = !WebServerStopped(WebServerFlags::DISCS);
 }
 
 void RemoteISOSettingsScreen::update() {
 	UIDialogScreenWithBackground::update();
 
-	bool nowRunning = RetrieveStatus() != ServerStatus::STOPPED;
+	bool nowRunning = !WebServerStopped(WebServerFlags::DISCS);
 	if (serverRunning_ != nowRunning) {
 		RecreateViews();
 	}
@@ -674,14 +515,27 @@ void RemoteISOSettingsScreen::CreateViews() {
 	remoteisoSettingsScroll->Add(remoteisoSettings);
 
 	remoteisoSettings->Add(new ItemHeader(ri->T("Remote disc streaming")));
-	remoteisoSettings->Add(new CheckBox(&g_Config.bRemoteISOManual, ri->T("Manual Mode Client", "Manual Mode Client")));
+	remoteisoSettings->Add(new CheckBox(&g_Config.bRemoteShareOnStartup, ri->T("Share on PPSSPP startup")));
+	remoteisoSettings->Add(new CheckBox(&g_Config.bRemoteISOManual, ri->T("Manual Mode Client", "Manually configure client")));
+#if !defined(MOBILE_DEVICE)
 	PopupTextInputChoice *remoteServer = remoteisoSettings->Add(new PopupTextInputChoice(&g_Config.sLastRemoteISOServer, ri->T("Remote Server"), "", 255, screenManager()));
+#else
+	ChoiceWithValueDisplay *remoteServer = new ChoiceWithValueDisplay(&g_Config.sLastRemoteISOServer, ri->T("Remote Server"), (const char *)nullptr);
+	remoteisoSettings->Add(remoteServer);
+	remoteServer->OnClick.Handle(this, &RemoteISOSettingsScreen::OnClickRemoteServer);
+#endif
 	remoteServer->SetEnabledPtr(&g_Config.bRemoteISOManual);
 	PopupSliderChoice *remotePort = remoteisoSettings->Add(new PopupSliderChoice(&g_Config.iLastRemoteISOPort, 0, 65535, ri->T("Remote Port", "Remote Port"), 100, screenManager()));
 	remotePort->SetEnabledPtr(&g_Config.bRemoteISOManual);
+#if !defined(MOBILE_DEVICE)
 	PopupTextInputChoice *remoteSubdir = remoteisoSettings->Add(new PopupTextInputChoice(&g_Config.sRemoteISOSubdir, ri->T("Remote Subdirectory"), "", 255, screenManager()));
-	remoteSubdir->SetEnabledPtr(&g_Config.bRemoteISOManual);
 	remoteSubdir->OnChange.Handle(this, &RemoteISOSettingsScreen::OnChangeRemoteISOSubdir);
+#else
+	ChoiceWithValueDisplay *remoteSubdir = remoteisoSettings->Add(
+			new ChoiceWithValueDisplay(&g_Config.sRemoteISOSubdir, ri->T("Remote Subdirectory"), (const char *)nullptr));
+	remoteSubdir->OnClick.Handle(this, &RemoteISOSettingsScreen::OnClickRemoteISOSubdir);
+#endif
+	remoteSubdir->SetEnabledPtr(&g_Config.bRemoteISOManual);
 
 	PopupSliderChoice *portChoice = new PopupSliderChoice(&g_Config.iRemoteISOPort, 0, 65535, ri->T("Local Server Port", "Local Server Port"), 100, screenManager());
 	remoteisoSettings->Add(portChoice);
@@ -691,6 +545,16 @@ void RemoteISOSettingsScreen::CreateViews() {
 	root_ = new AnchorLayout(new LayoutParams(FILL_PARENT, FILL_PARENT));
 	root_->Add(remoteisoSettingsScroll);
 	AddStandardBack(root_);
+}
+
+UI::EventReturn RemoteISOSettingsScreen::OnClickRemoteServer(UI::EventParams &e) {
+	System_SendMessage("inputbox", ("remoteiso_server:" + g_Config.sLastRemoteISOServer).c_str());
+	return UI::EVENT_DONE;
+}
+
+UI::EventReturn RemoteISOSettingsScreen::OnClickRemoteISOSubdir(UI::EventParams &e) {
+	System_SendMessage("inputbox", ("remoteiso_subdir:" + g_Config.sRemoteISOSubdir).c_str());
+	return UI::EVENT_DONE;
 }
 
 UI::EventReturn RemoteISOSettingsScreen::OnChangeRemoteISOSubdir(UI::EventParams &e) {

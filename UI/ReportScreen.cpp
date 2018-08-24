@@ -17,6 +17,8 @@
 
 #include <string>
 #include "base/display.h"
+// TODO: For text align flags, probably shouldn';t be in gfx_es2/...
+#include "gfx_es2/draw_buffer.h"
 #include "i18n/i18n.h"
 #include "thin3d/thin3d.h"
 #include "ui/ui_context.h"
@@ -62,11 +64,11 @@ private:
 
 RatingChoice::RatingChoice(const char *captionKey, int *value, LayoutParams *layoutParams)
 		: LinearLayout(ORIENT_VERTICAL, layoutParams), value_(value) {
-	SetSpacing(-8.0f);
+	SetSpacing(0.0f);
 
 	I18NCategory *rp = GetI18NCategory("Reporting");
 	group_ = new LinearLayout(ORIENT_HORIZONTAL);
-	Add(new InfoItem(rp->T(captionKey), ""));
+	Add(new TextView(rp->T(captionKey), FLAG_WRAP_TEXT, false))->SetShadow(true);
 	Add(group_);
 
 	group_->SetSpacing(0.0f);
@@ -170,6 +172,11 @@ void ReportScreen::update() {
 	UIDialogScreenWithGameBackground::update();
 }
 
+void ReportScreen::resized() {
+	UIDialogScreenWithGameBackground::resized();
+	RecreateViews();
+}
+
 EventReturn ReportScreen::HandleChoice(EventParams &e) {
 	if (overall_ == ReportingOverallScore::NONE) {
 		graphics_ = 0;
@@ -218,14 +225,15 @@ void ReportScreen::CreateViews() {
 
 	Margins actionMenuMargins(0, 20, 15, 0);
 	Margins contentMargins(0, 20, 5, 5);
+	float leftColumnWidth = dp_xres - actionMenuMargins.horiz() - contentMargins.horiz() - 300.0f;
 	ViewGroup *leftColumn = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(WRAP_CONTENT, FILL_PARENT, 0.4f, contentMargins));
 	LinearLayout *leftColumnItems = new LinearLayout(ORIENT_VERTICAL, new LayoutParams(WRAP_CONTENT, FILL_PARENT));
 	ViewGroup *rightColumn = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(300, FILL_PARENT, actionMenuMargins));
 	LinearLayout *rightColumnItems = new LinearLayout(ORIENT_VERTICAL);
 
-	leftColumnItems->Add(new TextView(rp->T("FeedbackDesc", "How's the emulation?  Let us and the community know!"), new LinearLayoutParams(Margins(12, 5, 0, 5))));
+	leftColumnItems->Add(new TextView(rp->T("FeedbackDesc", "How's the emulation?  Let us and the community know!"), FLAG_WRAP_TEXT, false, new LinearLayoutParams(Margins(12, 5, 0, 5))))->SetShadow(true);
 	if (!Reporting::IsEnabled()) {
-		reportingNotice_ = leftColumnItems->Add(new TextView(rp->T("FeedbackDisabled", "Compatibility server reports must be enabled."), new LinearLayoutParams(Margins(12, 5, 0, 5))));
+		reportingNotice_ = leftColumnItems->Add(new TextView(rp->T("FeedbackDisabled", "Compatibility server reports must be enabled."), FLAG_WRAP_TEXT, false, new LinearLayoutParams(Margins(12, 5, 0, 5))));
 		reportingNotice_->SetShadow(true);
 		reportingNotice_->SetTextColor(0xFF3030FF);
 		CheckBox *reporting = leftColumnItems->Add(new CheckBox(&enableReporting_, sy->T("Enable Compatibility Server Reports")));
@@ -237,7 +245,10 @@ void ReportScreen::CreateViews() {
 
 #ifdef MOBILE_DEVICE
 	if (!Core_GetPowerSaving()) {
-		leftColumnItems->Add(new TextView(rp->T("FeedbackIncludeCRC", "Note: Battery will be used to send a disc CRC"), new LinearLayoutParams(Margins(12, 5, 0, 5))))->SetEnabledPtr(&enableReporting_);
+		auto crcWarning = new TextView(rp->T("FeedbackIncludeCRC", "Note: Battery will be used to send a disc CRC"), FLAG_WRAP_TEXT, false, new LinearLayoutParams(Margins(12, 5, 0, 5)));
+		crcWarning->SetShadow(true);
+		crcWarning->SetEnabledPtr(&enableReporting_);
+		leftColumnItems->Add(crcWarning);
 	}
 #endif
 
@@ -247,7 +258,7 @@ void ReportScreen::CreateViews() {
 	}
 	screenshotFilename_ = path + ".reporting.jpg";
 	int shotWidth = 0, shotHeight = 0;
-	if (TakeGameScreenshot(screenshotFilename_.c_str(), SCREENSHOT_JPG, SCREENSHOT_DISPLAY, &shotWidth, &shotHeight, 4)) {
+	if (TakeGameScreenshot(screenshotFilename_.c_str(), ScreenshotFormat::JPG, SCREENSHOT_DISPLAY, &shotWidth, &shotHeight, 4)) {
 		float scale = 340.0f * (1.0f / g_dpi_scale_y) * (1.0f / shotHeight);
 		leftColumnItems->Add(new CheckBox(&includeScreenshot_, rp->T("FeedbackIncludeScreen", "Include a screenshot")))->SetEnabledPtr(&enableReporting_);
 		screenshot_ = leftColumnItems->Add(new AsyncImageFileView(screenshotFilename_, IS_DEFAULT, nullptr, new LinearLayoutParams(shotWidth * scale, shotHeight * scale, Margins(12, 0))));
@@ -257,10 +268,15 @@ void ReportScreen::CreateViews() {
 	}
 
 	leftColumnItems->Add(new CompatRatingChoice("Overall", (int *)&overall_))->SetEnabledPtr(&enableReporting_)->OnChoice.Handle(this, &ReportScreen::HandleChoice);
-	overallDescription_ = leftColumnItems->Add(new TextView("", new LinearLayoutParams(Margins(10, 0))));
-	leftColumnItems->Add(new RatingChoice("Graphics", &graphics_))->SetEnabledPtr(&ratingEnabled_)->OnChoice.Handle(this, &ReportScreen::HandleChoice);
-	leftColumnItems->Add(new RatingChoice("Speed", &speed_))->SetEnabledPtr(&ratingEnabled_)->OnChoice.Handle(this, &ReportScreen::HandleChoice);
-	leftColumnItems->Add(new RatingChoice("Gameplay", &gameplay_))->SetEnabledPtr(&ratingEnabled_)->OnChoice.Handle(this, &ReportScreen::HandleChoice);
+	overallDescription_ = leftColumnItems->Add(new TextView("", FLAG_WRAP_TEXT, false, new LinearLayoutParams(Margins(10, 0))));
+	overallDescription_->SetShadow(true);
+
+	UI::Orientation ratingsOrient = leftColumnWidth >= 750.0f ? ORIENT_HORIZONTAL : ORIENT_VERTICAL;
+	UI::LinearLayout *ratingsHolder = new LinearLayout(ratingsOrient, new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT));
+	leftColumnItems->Add(ratingsHolder);
+	ratingsHolder->Add(new RatingChoice("Graphics", &graphics_))->SetEnabledPtr(&ratingEnabled_)->OnChoice.Handle(this, &ReportScreen::HandleChoice);
+	ratingsHolder->Add(new RatingChoice("Speed", &speed_))->SetEnabledPtr(&ratingEnabled_)->OnChoice.Handle(this, &ReportScreen::HandleChoice);
+	ratingsHolder->Add(new RatingChoice("Gameplay", &gameplay_))->SetEnabledPtr(&ratingEnabled_)->OnChoice.Handle(this, &ReportScreen::HandleChoice);
 
 	rightColumnItems->SetSpacing(0.0f);
 	rightColumnItems->Add(new Choice(rp->T("Open Browser")))->OnClick.Handle(this, &ReportScreen::HandleBrowser);
@@ -287,16 +303,18 @@ void ReportScreen::UpdateSubmit() {
 void ReportScreen::UpdateOverallDescription() {
 	I18NCategory *rp = GetI18NCategory("Reporting");
 	const char *desc;
+	uint32_t c = 0xFFFFFFFF;
 	switch (overall_) {
 	case ReportingOverallScore::PERFECT: desc = rp->T("Perfect Description", "Flawless emulation for the entire game - great!"); break;
 	case ReportingOverallScore::PLAYABLE: desc = rp->T("Plays Description", "Fully playable but might be with glitches"); break;
-	case ReportingOverallScore::INGAME: desc = rp->T("In-game Description", "Gets into gameplay, but too buggy too complete"); break;
+	case ReportingOverallScore::INGAME: desc = rp->T("In-game Description", "Gets into gameplay, but too buggy to complete"); break;
 	case ReportingOverallScore::MENU: desc = rp->T("Menu/Intro Description", "Can't get into the game itself"); break;
-	case ReportingOverallScore::NONE: desc = rp->T("Nothing Description", "Completely broken"); break;
+	case ReportingOverallScore::NONE: desc = rp->T("Nothing Description", "Completely broken"); c = 0xFF0000FF; break;
 	default: desc = rp->T("Unselected Overall Description", "How well does this game emulate?"); break;
 	}
 
 	overallDescription_->SetText(desc);
+	overallDescription_->SetTextColor(c);
 }
 
 EventReturn ReportScreen::HandleSubmit(EventParams &e) {
@@ -318,7 +336,7 @@ EventReturn ReportScreen::HandleSubmit(EventParams &e) {
 	std::string filename = includeScreenshot_ ? screenshotFilename_ : "";
 	Reporting::ReportCompatibility(compat, graphics_ + 1, speed_ + 1, gameplay_ + 1, filename);
 	TriggerFinish(DR_OK);
-	screenManager()->push(new ReportFinishScreen(gamePath_));
+	screenManager()->push(new ReportFinishScreen(gamePath_, overall_));
 	return EVENT_DONE;
 }
 
@@ -328,8 +346,8 @@ EventReturn ReportScreen::HandleBrowser(EventParams &e) {
 	return EVENT_DONE;
 }
 
-ReportFinishScreen::ReportFinishScreen(const std::string &gamePath)
-	: UIDialogScreenWithGameBackground(gamePath), resultNotice_(nullptr), setStatus_(false) {
+ReportFinishScreen::ReportFinishScreen(const std::string &gamePath, ReportingOverallScore score)
+	: UIDialogScreenWithGameBackground(gamePath), score_(score) {
 }
 
 void ReportFinishScreen::CreateViews() {
@@ -343,8 +361,15 @@ void ReportFinishScreen::CreateViews() {
 	ViewGroup *rightColumn = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(300, FILL_PARENT, actionMenuMargins));
 	LinearLayout *rightColumnItems = new LinearLayout(ORIENT_VERTICAL);
 
-	leftColumnItems->Add(new TextView(rp->T("FeedbackThanks", "Thanks for your feedback."), new LinearLayoutParams(Margins(12, 5, 0, 5))));
-	resultNotice_ = leftColumnItems->Add(new TextView(rp->T("FeedbackDelayInfo", "Your data is being submitted in the background."), new LinearLayoutParams(Margins(12, 5, 0, 5))));
+	leftColumnItems->Add(new TextView(rp->T("FeedbackThanks", "Thanks for your feedback."), FLAG_WRAP_TEXT, false, new LinearLayoutParams(Margins(12, 5, 0, 5))))->SetShadow(true);
+	if (score_ == ReportingOverallScore::PERFECT || score_ == ReportingOverallScore::PLAYABLE) {
+		resultNotice_ = leftColumnItems->Add(new TextView(rp->T("FeedbackDelayInfo", "Your data is being submitted in the background."), FLAG_WRAP_TEXT, false, new LinearLayoutParams(Margins(12, 5, 0, 5))));
+	} else {
+		resultNotice_ = leftColumnItems->Add(new TextView(rp->T("SuggestionsWaiting", "Submitting and checking other user feedback.."), FLAG_WRAP_TEXT, false, new LinearLayoutParams(Margins(12, 5, 0, 5))));
+	}
+	resultNotice_->SetShadow(true);
+	resultItems_ = new LinearLayout(ORIENT_VERTICAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, Margins(12, 5, 0, 5)));
+	leftColumnItems->Add(resultItems_);
 
 	rightColumnItems->SetSpacing(0.0f);
 	rightColumnItems->Add(new Choice(rp->T("View Feedback")))->OnClick.Handle(this, &ReportFinishScreen::HandleViewFeedback);
@@ -364,17 +389,19 @@ void ReportFinishScreen::update() {
 	I18NCategory *rp = GetI18NCategory("Reporting");
 
 	if (!setStatus_) {
-		Reporting::Status status = Reporting::GetStatus();
+		Reporting::ReportStatus status = Reporting::GetStatus();
 		switch (status) {
-		case Reporting::Status::WORKING:
-			resultNotice_->SetText(rp->T("FeedbackSubmitDone", "Your data has been submitted."));
+		case Reporting::ReportStatus::WORKING:
+			ShowSuggestions();
+			setStatus_ = true;
 			break;
 
-		case Reporting::Status::FAILING:
+		case Reporting::ReportStatus::FAILING:
 			resultNotice_->SetText(rp->T("FeedbackSubmitFail", "Could not submit data to server.  Try updating PPSSPP."));
+			setStatus_ = true;
 			break;
 
-		case Reporting::Status::BUSY:
+		case Reporting::ReportStatus::BUSY:
 		default:
 			// Can't update yet.
 			break;
@@ -382,6 +409,52 @@ void ReportFinishScreen::update() {
 	}
 
 	UIDialogScreenWithGameBackground::update();
+}
+
+void ReportFinishScreen::ShowSuggestions() {
+	I18NCategory *rp = GetI18NCategory("Reporting");
+
+	auto suggestions = Reporting::CompatibilitySuggestions();
+	if (score_ == ReportingOverallScore::PERFECT || score_ == ReportingOverallScore::PLAYABLE) {
+		resultNotice_->SetText(rp->T("FeedbackSubmitDone", "Your data has been submitted."));
+	} else if (suggestions.empty()) {
+		resultNotice_->SetText(rp->T("SuggestionsNone", "This game isn't working for other users too."));
+	} else {
+		resultNotice_->SetText(rp->T("SuggestionsFound", "Other users have reported better results.  Tap View Feedback for more detail."));
+
+		resultItems_->Clear();
+		bool shownConfig = false;
+		bool valid = false;
+		for (auto item : suggestions) {
+			const char *suggestion = nullptr;
+			if (item == "Upgrade") {
+				suggestion = rp->T("SuggestionUpgrade", "Upgrade to a newer PPSSPP build");
+			} if (item == "Downgrade") {
+				suggestion = rp->T("SuggestionDowngrade", "Downgrade to an older PPSSPP version (please report this bug)");
+			} else if (item == "VerifyDisc") {
+				suggestion = rp->T("SuggestionVerifyDisc", "Check your ISO is a good copy of your disc");
+			} else if (item == "Config:CPUSpeed:0") {
+				suggestion = rp->T("SuggestionCPUSpeed0", "Disable locked CPU speed setting");
+			} else {
+				bool isConfig = startsWith(item, "Config:");
+				if (isConfig && !shownConfig) {
+					suggestion = rp->T("SuggestionConfig", "See reports on website for good settings");
+					shownConfig = true;
+				}
+				// Ignore unknown configs, hopefully we recognized "Upgrade" at least.
+			}
+
+			if (suggestion) {
+				valid = true;
+				resultItems_->Add(new TextView(std::string(" - ") + suggestion, FLAG_WRAP_TEXT, false))->SetShadow(true);
+			}
+		}
+
+		if (!valid) {
+			// No actual valid versions.  Let's just say upgrade and hope the server's not broken.
+			resultItems_->Add(new TextView(std::string(" - ") + rp->T("SuggestionUpgrade", "Upgrade to a newer PPSSPP build"), FLAG_WRAP_TEXT, false))->SetShadow(true);
+		}
+	}
 }
 
 UI::EventReturn ReportFinishScreen::HandleViewFeedback(UI::EventParams &e) {

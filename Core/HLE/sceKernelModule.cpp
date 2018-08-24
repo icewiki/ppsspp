@@ -295,13 +295,13 @@ public:
 			// On load state, we re-examine in case our syscall ids changed.
 			if (libstub != 0) {
 				importedFuncs.clear();
-				if (!KernelImportModuleFuncs(this, nullptr, true)) {
-					ERROR_LOG(LOADER, "Something went wrong loading imports on load state");
-				}
+				// Imports reloaded in KernelModuleDoState.
 			} else {
 				// Older save state.  Let's still reload, but this may not pick up new flags, etc.
 				bool foundBroken = false;
-				for (auto func : importedFuncs) {
+				auto importedFuncsState = importedFuncs;
+				importedFuncs.clear();
+				for (auto func : importedFuncsState) {
 					if (func.moduleName[KERNELOBJECT_MAX_NAME_LENGTH] != '\0' || !Memory::IsValidAddress(func.stubAddr)) {
 						foundBroken = true;
 					} else {
@@ -497,6 +497,19 @@ void __KernelModuleDoState(PointerWrap &p)
 		p.Do(loadedModules);
 	}
 
+	if (p.mode == p.MODE_READ) {
+		u32 error;
+		// We process these late, since they depend on loadedModules for interlinking.
+		for (SceUID moduleId : loadedModules) {
+			Module *module = kernelObjects.Get<Module>(moduleId, error);
+			if (module && module->libstub != 0) {
+				if (!KernelImportModuleFuncs(module, nullptr, true)) {
+					ERROR_LOG(LOADER, "Something went wrong loading imports on load state");
+				}
+			}
+		}
+	}
+
 	if (g_Config.bFuncReplacements) {
 		MIPSAnalyst::ReplaceFunctions();
 	}
@@ -635,8 +648,8 @@ void ImportVarSymbol(const VarSymbolImport &var) {
 	}
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(var.moduleName)) {
 			continue;
 		}
@@ -656,8 +669,8 @@ void ImportVarSymbol(const VarSymbolImport &var) {
 
 void ExportVarSymbol(const VarSymbolExport &var) {
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(var.moduleName)) {
 			continue;
 		}
@@ -674,8 +687,8 @@ void ExportVarSymbol(const VarSymbolExport &var) {
 
 void UnexportVarSymbol(const VarSymbolExport &var) {
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(var.moduleName)) {
 			continue;
 		}
@@ -699,12 +712,13 @@ void ImportFuncSymbol(const FuncSymbolImport &func, bool reimporting) {
 		}
 		WriteSyscall(func.moduleName, func.nid, func.stubAddr);
 		currentMIPS->InvalidateICache(func.stubAddr, 8);
+		MIPSAnalyst::PrecompileFunction(func.stubAddr, 8);
 		return;
 	}
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(func.moduleName)) {
 			continue;
 		}
@@ -717,6 +731,7 @@ void ImportFuncSymbol(const FuncSymbolImport &func, bool reimporting) {
 				}
 				WriteFuncStub(func.stubAddr, it->symAddr);
 				currentMIPS->InvalidateICache(func.stubAddr, 8);
+				MIPSAnalyst::PrecompileFunction(func.stubAddr, 8);
 				return;
 			}
 		}
@@ -743,8 +758,8 @@ void ExportFuncSymbol(const FuncSymbolExport &func) {
 	}
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(func.moduleName)) {
 			continue;
 		}
@@ -755,6 +770,7 @@ void ExportFuncSymbol(const FuncSymbolExport &func) {
 				INFO_LOG(LOADER, "Resolving function %s/%08x", func.moduleName, func.nid);
 				WriteFuncStub(it->stubAddr, func.symAddr);
 				currentMIPS->InvalidateICache(it->stubAddr, 8);
+				MIPSAnalyst::PrecompileFunction(it->stubAddr, 8);
 			}
 		}
 	}
@@ -767,8 +783,8 @@ void UnexportFuncSymbol(const FuncSymbolExport &func) {
 	}
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(func.moduleName)) {
 			continue;
 		}
@@ -1068,9 +1084,7 @@ static Module *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 loadAdd
 
 		if (IsHLEVersionedModule(head->modname)) {
 			int ver = (head->module_ver_hi << 8) | head->module_ver_lo;
-			char temp[256];
-			snprintf(temp, sizeof(temp), "Loading module %s with version %%04x, devkit %%08x", head->modname);
-			INFO_LOG_REPORT(SCEMODULE, temp, ver, head->devkitversion);
+			INFO_LOG(SCEMODULE, "Loading module %s with version %04x, devkit %08x", head->modname, ver, head->devkitversion);
 			reportedModule = true;
 
 			if (!strcmp(head->modname, "sceMpeg_library")) {
@@ -1146,7 +1160,7 @@ static Module *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 loadAdd
 
 	// DO NOT change to else if, see above.
 	if (*magicPtr != 0x464c457f) {
-		ERROR_LOG_REPORT(SCEMODULE, "Wrong magic number %08x", *magicPtr);
+		ERROR_LOG(SCEMODULE, "Wrong magic number %08x", *magicPtr);
 		*error_string = "File corrupt";
 		if (newptr)
 			delete [] newptr;
@@ -1223,22 +1237,10 @@ static Module *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 loadAdd
 	if (textSection != -1) {
 		module->textStart = reader.GetSectionAddr(textSection);
 		u32 textSize = reader.GetSectionSize(textSection);
-		module->textEnd = module->textStart + textSize;
+		module->textEnd = module->textStart + textSize - 4;
 
 		module->nm.text_addr = module->textStart;
 		module->nm.text_size = reader.GetTotalTextSize();
-
-		if (!module->isFake) {
-#if !defined(MOBILE_DEVICE)
-			bool gotSymbols = reader.LoadSymbols();
-			MIPSAnalyst::ScanForFunctions(module->textStart, module->textEnd, !gotSymbols);
-#else
-			if (g_Config.bFuncReplacements) {
-				bool gotSymbols = reader.LoadSymbols();
-				MIPSAnalyst::ScanForFunctions(module->textStart, module->textEnd, !gotSymbols);
-			}
-#endif
-		}
 	} else {
 		module->nm.text_addr = 0;
 		module->nm.text_size = 0;
@@ -1258,17 +1260,50 @@ static Module *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 loadAdd
 	if (textSection == -1) {
 		module->textStart = reader.GetVaddr();
 		module->textEnd = firstImportStubAddr - 4;
+	}
 
-		if (!module->isFake) {
-#if !defined(MOBILE_DEVICE)
-			bool gotSymbols = reader.LoadSymbols();
-			MIPSAnalyst::ScanForFunctions(module->textStart, module->textEnd, !gotSymbols);
-#else
-			if (g_Config.bFuncReplacements) {
-				bool gotSymbols = reader.LoadSymbols();
-				MIPSAnalyst::ScanForFunctions(module->textStart, module->textEnd, !gotSymbols);
-			}
+	if (!module->isFake) {
+		bool scan = true;
+#if defined(MOBILE_DEVICE)
+		scan = g_Config.bFuncReplacements;
 #endif
+
+		// If the ELF has debug symbols, don't add entries to the symbol table.
+		bool insertSymbols = scan && !reader.LoadSymbols();
+		std::vector<SectionID> codeSections = reader.GetCodeSections();
+		for (SectionID id : codeSections) {
+			u32 start = reader.GetSectionAddr(id);
+			// Note: scan end is inclusive.
+			u32 end = start + reader.GetSectionSize(id) - 4;
+
+			if (start < module->textStart)
+				module->textStart = start;
+			if (end > module->textEnd)
+				module->textEnd = end;
+
+			if (scan) {
+				insertSymbols = MIPSAnalyst::ScanForFunctions(start, end, insertSymbols);
+			}
+		}
+
+		// Some games don't have any sections at all.
+		if (scan && codeSections.empty()) {
+			u32 scanStart = module->textStart;
+			u32 scanEnd = module->textEnd;
+			// Skip the exports and imports sections, they're not code.
+			if (scanEnd >= std::min(modinfo->libent, modinfo->libstub)) {
+				insertSymbols = MIPSAnalyst::ScanForFunctions(scanStart, std::min(modinfo->libent, modinfo->libstub) - 4, insertSymbols);
+				scanStart = std::min(modinfo->libentend, modinfo->libstubend);
+			}
+			if (scanEnd >= std::max(modinfo->libent, modinfo->libstub)) {
+				insertSymbols = MIPSAnalyst::ScanForFunctions(scanStart, std::max(modinfo->libent, modinfo->libstub) - 4, insertSymbols);
+				scanStart = std::max(modinfo->libentend, modinfo->libstubend);
+			}
+			insertSymbols = MIPSAnalyst::ScanForFunctions(scanStart, scanEnd, insertSymbols);
+		}
+
+		if (scan) {
+			MIPSAnalyst::FinalizeScan(insertSymbols);
 		}
 	}
 
@@ -1424,6 +1459,9 @@ static Module *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 loadAdd
 		// use module_start_func instead of entry_addr if entry_addr is 0
 		if (module->nm.entry_addr == 0)
 			module->nm.entry_addr = module->nm.module_start_func;
+
+		MIPSAnalyst::PrecompileFunctions();
+
 	} else {
 		module->nm.entry_addr = -1;
 	}
@@ -1432,9 +1470,7 @@ static Module *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 loadAdd
 		delete [] newptr;
 
 	if (!reportedModule && IsHLEVersionedModule(modinfo->name)) {
-		char temp[256];
-		snprintf(temp, sizeof(temp), "Loading module %s with version %%04x, devkit %%08x", modinfo->name);
-		INFO_LOG_REPORT(SCEMODULE, temp, modinfo->moduleVersion, devkitVersion);
+		INFO_LOG(SCEMODULE, "Loading module %s with version %04x, devkit %08x", modinfo->name, modinfo->moduleVersion, devkitVersion);
 
 		if (!strcmp(modinfo->name, "sceMpeg_library")) {
 			__MpegLoadModule(modinfo->moduleVersion);
@@ -1547,6 +1583,7 @@ void __KernelLoadReset() {
 		HLEShutdown();
 		Replacement_Init();
 		HLEInit();
+		assert(gpu);
 		gpu->Reinitialize();
 	}
 
@@ -1556,6 +1593,8 @@ void __KernelLoadReset() {
 
 bool __KernelLoadExec(const char *filename, u32 paramPtr, std::string *error_string) {
 	SceKernelLoadExecParam param;
+
+	PSP_SetLoading("Loading game...");
 
 	if (paramPtr)
 		Memory::ReadStruct(paramPtr, &param);
@@ -1595,6 +1634,7 @@ bool __KernelLoadExec(const char *filename, u32 paramPtr, std::string *error_str
 
 	pspFileSystem.ReadFile(handle, temp, (size_t)info.size);
 
+	PSP_SetLoading("Loading modules...");
 	Module *module = __KernelLoadModule(temp, (size_t)info.size, 0, error_string);
 
 	if (!module || module->isFake) {
@@ -1635,6 +1675,7 @@ bool __KernelLoadExec(const char *filename, u32 paramPtr, std::string *error_str
 	if (module->nm.module_start_thread_stacksize != 0)
 		option.stacksize = module->nm.module_start_thread_stacksize;
 
+	PSP_SetLoading("Starting modules...");
 	if (paramPtr)
 		__KernelStartModule(module, param.args, (const char*)param_argp, &option);
 	else
@@ -1651,6 +1692,7 @@ bool __KernelLoadExec(const char *filename, u32 paramPtr, std::string *error_str
 
 bool __KernelLoadGEDump(const std::string &base_filename, std::string *error_string) {
 	__KernelLoadReset();
+	PSP_SetLoading("Generating code...");
 
 	mipsr4k.pc = PSP_GetUserMemoryBase();
 
@@ -1769,8 +1811,7 @@ u32 sceKernelLoadModule(const char *name, u32 flags, u32 optionAddr) {
 	s64 size = (s64)info.size;
 
 	if (!info.exists) {
-		const int ERROR_ERRNO_FILE_NOT_FOUND = 0x80010002;
-		const u32 error = hleLogError(LOADER, ERROR_ERRNO_FILE_NOT_FOUND, "file does not exist");
+		const u32 error = hleLogError(LOADER, SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND, "file does not exist");
 		return hleDelayResult(error, "module loaded", 500);
 	}
 
@@ -1810,7 +1851,7 @@ u32 sceKernelLoadModule(const char *name, u32 flags, u32 optionAddr) {
 	u32 magic;
 	u32 error;
 	std::string error_string;
-	module = __KernelLoadELFFromPtr(temp, (size_t)size, 0, lmoption ? lmoption->position == 1 : false, &error_string, &magic, error);
+	module = __KernelLoadELFFromPtr(temp, (size_t)size, 0, lmoption ? lmoption->position == PSP_SMEM_High : false, &error_string, &magic, error);
 	delete [] temp;
 	pspFileSystem.CloseFile(handle);
 
@@ -2256,7 +2297,7 @@ static u32 sceKernelLoadModuleByID(u32 id, u32 flags, u32 lmoptionPtr)
 	u8 *temp = new u8[size - pos];
 	pspFileSystem.ReadFile(handle, temp, size - pos);
 	u32 magic;
-	module = __KernelLoadELFFromPtr(temp, size - pos, 0, lmoption ? lmoption->position == 1 : false, &error_string, &magic, error);
+	module = __KernelLoadELFFromPtr(temp, size - pos, 0, lmoption ? lmoption->position == PSP_SMEM_High : false, &error_string, &magic, error);
 	delete [] temp;
 
 	if (!module) {
@@ -2313,7 +2354,7 @@ static SceUID sceKernelLoadModuleBufferUsbWlan(u32 size, u32 bufPtr, u32 flags, 
 	Module *module = 0;
 	u32 magic;
 	u32 error;
-	module = __KernelLoadELFFromPtr(Memory::GetPointer(bufPtr), size, 0, lmoption ? lmoption->position == 1 : false, &error_string, &magic, error);
+	module = __KernelLoadELFFromPtr(Memory::GetPointer(bufPtr), size, 0, lmoption ? lmoption->position == PSP_SMEM_High : false, &error_string, &magic, error);
 
 	if (!module) {
 		// Some games try to load strange stuff as PARAM.SFO as modules and expect it to fail.
@@ -2392,8 +2433,8 @@ static u32 sceKernelGetModuleIdList(u32 resultBuffer, u32 resultBufferSize, u32 
 	u32 resultBufferOffset = 0;
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {		
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module->isFake) {
 			if (resultBufferOffset < resultBufferSize) {
 				Memory::Write_U32(module->GetUID(), resultBuffer + resultBufferOffset);

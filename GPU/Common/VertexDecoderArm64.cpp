@@ -196,7 +196,7 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 	// Add code to convert matrices to 4x4.
 	// Later we might want to do this when the matrices are loaded instead.
 	int boneCount = 0;
-	if (dec.weighttype && g_Config.bSoftwareSkinning && dec.morphcount == 1) {
+	if (dec.weighttype && g_Config.bSoftwareSkinning) {
 		// Copying from R3 to R4
 		MOVP2R(X3, gstate.boneMatrix);
 		MOVP2R(X4, bones);
@@ -698,7 +698,7 @@ void VertexDecoderJitCache::Jit_PosS16Through() {
 }
 
 void VertexDecoderJitCache::Jit_NormalS8() {
-	LDRH(INDEX_UNSIGNED, tempReg1, srcReg, dec_->nrmoff);
+	LDURH(tempReg1, srcReg, dec_->nrmoff);
 	LDRB(INDEX_UNSIGNED, tempReg3, srcReg, dec_->nrmoff + 2);
 	ORR(tempReg1, tempReg1, tempReg3, ArithOption(tempReg3, ST_LSL, 16));
 	STR(INDEX_UNSIGNED, tempReg1, dstReg, dec_->decFmt.nrmoff);

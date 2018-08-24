@@ -6,6 +6,8 @@
 #include "gfx_es2/draw_buffer.h"
 #include "gfx_es2/draw_text.h"
 
+#include "Common/Log.h"
+
 UIContext::UIContext() {
 	fontStyle_ = new UI::FontStyle();
 	bounds_ = Bounds(0, 0, dp_xres, dp_yres);
@@ -28,13 +30,19 @@ void UIContext::Init(Draw::DrawContext *thin3d, Draw::Pipeline *uipipe, Draw::Pi
 	textDrawer_ = TextDrawer::Create(thin3d);  // May return nullptr if no implementation is available for this platform.
 }
 
-void UIContext::FrameSetup(Draw::Texture *uiTexture) {
-	uitexture_ = uiTexture;
+void UIContext::BeginFrame() {
+	if (!uitexture_) {
+		uitexture_ = CreateTextureFromFile(draw_, "ui_atlas.zim", ImageFileType::ZIM, false);
+		if (!uitexture_) {
+			PanicAlert("Failed to load ui_atlas.zim.\n\nPlace it in the directory \"assets\" under your PPSSPP directory.");
+			FLOG("Failed to load ui_atlas.zim");
+		}
+	}
 }
 
 void UIContext::Begin() {
 	draw_->BindSamplerStates(0, 1, &sampler_);
-	draw_->BindTexture(0, uitexture_);
+	draw_->BindTexture(0, uitexture_->GetTexture());
 	ActivateTopScissor();
 	UIBegin(ui_pipeline_);
 }
@@ -45,7 +53,7 @@ void UIContext::BeginNoTex() {
 }
 
 void UIContext::RebindTexture() const {
-	draw_->BindTexture(0, uitexture_);
+	draw_->BindTexture(0, uitexture_->GetTexture());
 }
 
 void UIContext::Flush() {
@@ -70,6 +78,8 @@ void UIContext::PushScissor(const Bounds &bounds) {
 	Bounds clipped = TransformBounds(bounds);
 	if (scissorStack_.size())
 		clipped.Clip(scissorStack_.back());
+	else
+		clipped.Clip(bounds_);
 	scissorStack_.push_back(clipped);
 	ActivateTopScissor();
 }
@@ -172,7 +182,10 @@ void UIContext::DrawTextRect(const char *str, const Bounds &bounds, uint32_t col
 		Draw()->DrawTextRect(fontStyle_->atlasFont, str, bounds.x, bounds.y, bounds.w, bounds.h, color, align);
 	} else {
 		textDrawer_->SetFontScale(fontScaleX_, fontScaleY_);
-		textDrawer_->DrawStringRect(*Draw(), str, bounds, color, align);
+		Bounds rounded = bounds;
+		rounded.x = floorf(rounded.x);
+		rounded.y = floorf(rounded.y);
+		textDrawer_->DrawStringRect(*Draw(), str, rounded, color, align);
 		RebindTexture();
 	}
 }

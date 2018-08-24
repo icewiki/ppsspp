@@ -46,9 +46,9 @@
     <MinimumVisualStudioVersion>14.0</MinimumVisualStudioVersion>
     <AppContainerApplication>true</AppContainerApplication>
     <ApplicationType>Windows Store</ApplicationType>
-    <WindowsTargetPlatformMinVersion>10.0.10240.0</WindowsTargetPlatformMinVersion>
+    <WindowsTargetPlatformMinVersion>10.0.14393.0</WindowsTargetPlatformMinVersion>
     <ApplicationTypeRevision>10.0</ApplicationTypeRevision>
-    <WindowsTargetPlatformVersion>10.0.15063.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0.16299.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -328,8 +328,6 @@
     <ClInclude Include="..\..\ext\native\ext\libzip\config.h" />
     <ClInclude Include="..\..\ext\native\ext\libzip\zip.h" />
     <ClInclude Include="..\..\ext\native\ext\libzip\zipint.h" />
-    <ClInclude Include="..\..\ext\native\ext\vjson\block_allocator.h" />
-    <ClInclude Include="..\..\ext\native\ext\vjson\json.h" />
     <ClInclude Include="..\..\ext\native\file\chunk_file.h" />
     <ClInclude Include="..\..\ext\native\file\fd_util.h" />
     <ClInclude Include="..\..\ext\native\file\file_util.h" />
@@ -338,7 +336,8 @@
     <ClInclude Include="..\..\ext\native\file\path.h" />
     <ClInclude Include="..\..\ext\native\file\vfs.h" />
     <ClInclude Include="..\..\ext\native\file\zip_read.h" />
-    <ClInclude Include="..\..\ext\native\gfx\gl_lost_manager.h" />
+    <ClInclude Include="..\..\ext\native\json\json_reader.h" />
+    <ClInclude Include="..\..\ext\native\json\json_writer.h" />
     <ClInclude Include="..\..\ext\native\gfx\texture_atlas.h" />
     <ClInclude Include="..\..\ext\native\gfx_es2\draw_buffer.h" />
     <ClInclude Include="..\..\ext\native\gfx_es2\draw_text.h" />
@@ -376,6 +375,7 @@
     <ClInclude Include="..\..\ext\native\ui\ui.h" />
     <ClInclude Include="..\..\ext\native\ui\ui_context.h" />
     <ClInclude Include="..\..\ext\native\ui\ui_screen.h" />
+    <ClInclude Include="..\..\ext\native\ui\ui_tween.h" />
     <ClInclude Include="..\..\ext\native\ui\view.h" />
     <ClInclude Include="..\..\ext\native\ui\viewgroup.h" />
     <ClInclude Include="..\..\ext\native\util\const_map.h" />
@@ -1160,8 +1160,6 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='UWP Gold|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\..\ext\native\ext\vjson\block_allocator.cpp" />
-    <ClCompile Include="..\..\ext\native\ext\vjson\json.cpp" />
     <ClCompile Include="..\..\ext\native\file\chunk_file.cpp" />
     <ClCompile Include="..\..\ext\native\file\fd_util.cpp" />
     <ClCompile Include="..\..\ext\native\file\file_util.cpp" />
@@ -1169,7 +1167,8 @@
     <ClCompile Include="..\..\ext\native\file\ini_file.cpp" />
     <ClCompile Include="..\..\ext\native\file\path.cpp" />
     <ClCompile Include="..\..\ext\native\file\zip_read.cpp" />
-    <ClCompile Include="..\..\ext\native\gfx\gl_lost_manager.cpp" />
+    <ClCompile Include="..\..\ext\native\json\json_reader.cpp" />
+    <ClCompile Include="..\..\ext\native\json\json_writer.cpp" />
     <ClCompile Include="..\..\ext\native\gfx\texture_atlas.cpp" />
     <ClCompile Include="..\..\ext\native\gfx_es2\draw_buffer.cpp" />
     <ClCompile Include="..\..\ext\native\gfx_es2\draw_text.cpp" />
@@ -1290,6 +1289,7 @@
     <ClCompile Include="..\..\ext\native\ui\ui.cpp" />
     <ClCompile Include="..\..\ext\native\ui\ui_context.cpp" />
     <ClCompile Include="..\..\ext\native\ui\ui_screen.cpp" />
+    <ClCompile Include="..\..\ext\native\ui\ui_tween.cpp" />
     <ClCompile Include="..\..\ext\native\ui\view.cpp" />
     <ClCompile Include="..\..\ext\native\ui\viewgroup.cpp" />
     <ClCompile Include="..\..\ext\native\util\hash\hash.cpp" />

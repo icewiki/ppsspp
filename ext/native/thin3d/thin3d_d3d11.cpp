@@ -13,10 +13,16 @@
 #include "Common/ColorConv.h"
 
 #include <cassert>
+#include <cfloat>
 #include <D3DCommon.h>
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
+
+#ifdef __MINGW32__
+#undef __uuidof
+#define __uuidof(type) IID_##type
+#endif
 
 namespace Draw {
 
@@ -32,11 +38,14 @@ class D3D11RasterState;
 
 class D3D11DrawContext : public DrawContext {
 public:
-	D3D11DrawContext(ID3D11Device *device, ID3D11DeviceContext *deviceContext, ID3D11Device1 *device1, ID3D11DeviceContext1 *deviceContext1, D3D_FEATURE_LEVEL featureLevel, HWND hWnd);
+	D3D11DrawContext(ID3D11Device *device, ID3D11DeviceContext *deviceContext, ID3D11Device1 *device1, ID3D11DeviceContext1 *deviceContext1, D3D_FEATURE_LEVEL featureLevel, HWND hWnd, std::vector<std::string> deviceList);
 	~D3D11DrawContext();
 
 	const DeviceCaps &GetDeviceCaps() const override {
 		return caps_;
+	}
+	std::vector<std::string> GetDeviceList() const override {
+		return deviceList_;
 	}
 	uint32_t GetSupportedShaderLanguages() const override {
 		return (uint32_t)ShaderLanguage::HLSL_D3D11 | (uint32_t)ShaderLanguage::HLSL_D3D11_BYTECODE;
@@ -92,6 +101,8 @@ public:
 	void DrawUP(const void *vdata, int vertexCount) override;
 	void Clear(int mask, uint32_t colorval, float depthVal, int stencilVal);
 
+	void BeginFrame() override;
+
 	std::string GetInfoString(InfoField info) const override {
 		switch (info) {
 		case APIVERSION: return "Direct3D 11";
@@ -116,7 +127,7 @@ public:
 		}
 	}
 
-	uintptr_t GetNativeObject(NativeObject obj) const override {
+	uintptr_t GetNativeObject(NativeObject obj) override {
 		switch (obj) {
 		case NativeObject::DEVICE:
 			return (uintptr_t)device_;
@@ -202,21 +213,26 @@ private:
 	// System info
 	D3D_FEATURE_LEVEL featureLevel_;
 	std::string adapterDesc_;
+	std::vector<std::string> deviceList_;
 };
 
-D3D11DrawContext::D3D11DrawContext(ID3D11Device *device, ID3D11DeviceContext *deviceContext, ID3D11Device1 *device1, ID3D11DeviceContext1 *deviceContext1, D3D_FEATURE_LEVEL featureLevel, HWND hWnd)
+D3D11DrawContext::D3D11DrawContext(ID3D11Device *device, ID3D11DeviceContext *deviceContext, ID3D11Device1 *device1, ID3D11DeviceContext1 *deviceContext1, D3D_FEATURE_LEVEL featureLevel, HWND hWnd, std::vector<std::string> deviceList)
 	: device_(device),
 		context_(deviceContext1),
 		device1_(device1),
 		context1_(deviceContext1),
 		featureLevel_(featureLevel),
-		hWnd_(hWnd) {
+		hWnd_(hWnd),
+		deviceList_(deviceList) {
 
 	// Seems like a fair approximation...
 	caps_.dualSourceBlend = featureLevel_ >= D3D_FEATURE_LEVEL_10_0;
 
 	caps_.depthRangeMinusOneToOne = false;
 	caps_.framebufferBlitSupported = false;
+	caps_.framebufferCopySupported = true;
+	caps_.framebufferDepthBlitSupported = false;
+	caps_.framebufferDepthCopySupported = true;
 
 	D3D11_FEATURE_DATA_D3D11_OPTIONS options{};
 	HRESULT result = device_->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options));
@@ -227,8 +243,6 @@ D3D11DrawContext::D3D11DrawContext(ID3D11Device *device, ID3D11DeviceContext *de
 			// caps_.logicOpSupported = true;
 		}
 	}
-	// Obtain DXGI factory from device (since we used nullptr for pAdapter above)
-	IDXGIFactory1* dxgiFactory = nullptr;
 	IDXGIDevice* dxgiDevice = nullptr;
 	IDXGIAdapter* adapter = nullptr;
 	HRESULT hr = device_->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice));
@@ -238,11 +252,20 @@ D3D11DrawContext::D3D11DrawContext(ID3D11Device *device, ID3D11DeviceContext *de
 			DXGI_ADAPTER_DESC desc;
 			adapter->GetDesc(&desc);
 			adapterDesc_ = ConvertWStringToUTF8(desc.Description);
+			switch (desc.VendorId) {
+			case 0x10DE: caps_.vendor = GPUVendor::VENDOR_NVIDIA; break;
+			case 0x1002:
+			case 0x1022: caps_.vendor = GPUVendor::VENDOR_AMD; break;
+			case 0x163C:
+			case 0x8086:
+			case 0x8087: caps_.vendor = GPUVendor::VENDOR_INTEL; break;
+			default:
+				caps_.vendor = GPUVendor::VENDOR_UNKNOWN;
+			}
 			adapter->Release();
 		}
 		dxgiDevice->Release();
 	}
-	CreatePresets();
 
 	// Temp texture for read-back of small images. Custom textures are created on demand for larger ones.
 	// TODO: Should really benchmark if this extra complexity has any benefit.
@@ -704,12 +727,13 @@ public:
 };
 
 Texture *D3D11DrawContext::CreateTexture(const TextureDesc &desc) {
-	D3D11Texture *tex = new D3D11Texture(desc);
 
 	if (!(GetDataFormatSupport(desc.format) & FMT_TEXTURE)) {
 		// D3D11 does not support this format as a texture format.
-		return false;
+		return nullptr;
 	}
+
+	D3D11Texture *tex = new D3D11Texture(desc);
 
 	bool generateMips = desc.generateMips;
 	if (desc.generateMips && !(GetDataFormatSupport(desc.format) & FMT_AUTOGEN_MIPS)) {
@@ -1254,6 +1278,34 @@ void D3D11DrawContext::Clear(int mask, uint32_t colorval, float depthVal, int st
 	}
 }
 
+void D3D11DrawContext::BeginFrame() {
+	context_->OMSetRenderTargets(1, &curRenderTargetView_, curDepthStencilView_);
+
+	if (curBlend_) {
+		context_->OMSetBlendState(curBlend_->bs, blendFactor_, 0xFFFFFFFF);
+	}
+	if (curDepth_) {
+		context_->OMSetDepthStencilState(curDepth_->dss, stencilRef_);
+	}
+	if (curRaster_) {
+		context_->RSSetState(curRaster_->rs);
+	}
+	context_->IASetInputLayout(curInputLayout_);
+	context_->VSSetShader(curVS_, nullptr, 0);
+	context_->PSSetShader(curPS_, nullptr, 0);
+	context_->GSSetShader(curGS_, nullptr, 0);
+	if (curTopology_ != D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED) {
+		context_->IASetPrimitiveTopology(curTopology_);
+	}
+	if (curPipeline_) {
+		context_->IASetVertexBuffers(0, 1, nextVertexBuffers_, (UINT *)curPipeline_->input->strides.data(), (UINT *)nextVertexBufferOffsets_);
+		context_->IASetIndexBuffer(nextIndexBuffer_, DXGI_FORMAT_R32_UINT, nextIndexBufferOffset_);
+		if (curPipeline_->dynamicUniforms) {
+			context_->VSSetConstantBuffers(0, 1, &curPipeline_->dynamicUniforms);
+		}
+	}
+}
+
 void D3D11DrawContext::CopyFramebufferImage(Framebuffer *srcfb, int level, int x, int y, int z, Framebuffer *dstfb, int dstLevel, int dstX, int dstY, int dstZ, int width, int height, int depth, int channelBit) {
 	D3D11Framebuffer *src = (D3D11Framebuffer *)srcfb;
 	D3D11Framebuffer *dst = (D3D11Framebuffer *)dstfb;
@@ -1308,60 +1360,23 @@ bool D3D11DrawContext::BlitFramebuffer(Framebuffer *srcfb, int srcX1, int srcY1,
 	return false;
 }
 
-// TODO: SSE/NEON
-// Could also make C fake-simd for 64-bit, two 8888 pixels fit in a register :)
-void ConvertFromRGBA8888(u8 *dst, u8 *src, u32 dstStride, u32 srcStride, u32 width, u32 height, Draw::DataFormat format) {
-	// Must skip stride in the cases below.  Some games pack data into the cracks, like MotoGP.
-	const u32 *src32 = (const u32 *)src;
-
-	if (format == Draw::DataFormat::R8G8B8A8_UNORM) {
-		u32 *dst32 = (u32 *)dst;
-		if (src == dst) {
-			return;
-		} else {
-			for (u32 y = 0; y < height; ++y) {
-				memcpy(dst32, src32, width * 4);
-				src32 += srcStride;
-				dst32 += dstStride;
-			}
-		}
-	} else {
-		// But here it shouldn't matter if they do intersect
-		u16 *dst16 = (u16 *)dst;
-		switch (format) {
-		case Draw::DataFormat::R5G6B5_UNORM_PACK16: // BGR 565
-			for (u32 y = 0; y < height; ++y) {
-				ConvertRGBA8888ToRGB565(dst16, src32, width);
-				src32 += srcStride;
-				dst16 += dstStride;
-			}
-			break;
-		case Draw::DataFormat::A1R5G5B5_UNORM_PACK16: // ABGR 1555
-			for (u32 y = 0; y < height; ++y) {
-				ConvertRGBA8888ToRGBA5551(dst16, src32, width);
-				src32 += srcStride;
-				dst16 += dstStride;
-			}
-			break;
-		case Draw::DataFormat::A4R4G4B4_UNORM_PACK16: // ABGR 4444
-			for (u32 y = 0; y < height; ++y) {
-				ConvertRGBA8888ToRGBA4444(dst16, src32, width);
-				src32 += srcStride;
-				dst16 += dstStride;
-			}
-			break;
-		case Draw::DataFormat::R8G8B8A8_UNORM:
-		case Draw::DataFormat::UNDEFINED:
-			// Not possible.
-			break;
-		}
-	}
-}
-
 bool D3D11DrawContext::CopyFramebufferToMemorySync(Framebuffer *src, int channelBits, int bx, int by, int bw, int bh, Draw::DataFormat format, void *pixels, int pixelStride) {
 	D3D11Framebuffer *fb = (D3D11Framebuffer *)src;
 
-	assert(fb->colorFormat == DXGI_FORMAT_R8G8B8A8_UNORM);
+	if (fb) {
+		assert(fb->colorFormat == DXGI_FORMAT_R8G8B8A8_UNORM);
+
+		// TODO: Figure out where the badness really comes from.
+		if (bx + bw > fb->width) {
+			bw -= (bx + bw) - fb->width;
+		}
+		if (by + bh > fb->height) {
+			bh -= (by + bh) - fb->height;
+		}
+	}
+
+	if (bh <= 0 || bw <= 0)
+		return true;
 
 	bool useGlobalPacktex = (bx + bw <= 512 && by + bh <= 512) && channelBits == FB_COLOR_BIT;
 
@@ -1383,6 +1398,10 @@ bool D3D11DrawContext::CopyFramebufferToMemorySync(Framebuffer *src, int channel
 			break;
 		case FB_DEPTH_BIT:
 		case FB_STENCIL_BIT:
+			if (!fb) {
+				// Not supported.
+				return false;
+			}
 			packDesc.Format = fb->depthStencilFormat;
 			break;
 		default:
@@ -1390,21 +1409,31 @@ bool D3D11DrawContext::CopyFramebufferToMemorySync(Framebuffer *src, int channel
 		}
 		device_->CreateTexture2D(&packDesc, nullptr, &packTex);
 	} else {
+		switch (channelBits) {
+		case FB_DEPTH_BIT:
+		case FB_STENCIL_BIT:
+			if (!fb)
+				return false;
+		default:
+			break;
+		}
 		packTex = packTexture_;
 	}
 
 	D3D11_BOX srcBox{ (UINT)bx, (UINT)by, 0, (UINT)(bx + bw), (UINT)(by + bh), 1 };
 	switch (channelBits) {
 	case FB_COLOR_BIT:
-		context_->CopySubresourceRegion(packTex, 0, bx, by, 0, fb->colorTex, 0, &srcBox);
+		context_->CopySubresourceRegion(packTex, 0, bx, by, 0, fb ? fb->colorTex : bbRenderTargetTex_, 0, &srcBox);
 		break;
 	case FB_DEPTH_BIT:
 	case FB_STENCIL_BIT:
 		// For depth/stencil buffers, we can't reliably copy subrectangles, so just copy the whole resource.
-		context_->CopyResource(packTex, fb->colorTex);
+		assert(fb);  // Can't copy depth/stencil from backbuffer. Shouldn't happen thanks to checks above.
+		context_->CopyResource(packTex, fb->depthStencilTex);
 		break;
 	default:
 		assert(false);
+		break;
 	}
 
 	// Ideally, we'd round robin between two packTexture_, and simply use the other one. Though if the game
@@ -1481,8 +1510,15 @@ void D3D11DrawContext::BindFramebufferAsRenderTarget(Framebuffer *fbo, const Ren
 			Uint8x4ToFloat4(cv, rp.clearColor);
 		context_->ClearRenderTargetView(curRenderTargetView_, cv);
 	}
-	if (rp.depth == RPAction::CLEAR && curDepthStencilView_) {
-		context_->ClearDepthStencilView(curDepthStencilView_, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, rp.clearDepth, rp.clearStencil);
+	int mask = 0;
+	if (rp.depth == RPAction::CLEAR) {
+		mask |= D3D11_CLEAR_DEPTH;
+	}
+	if (rp.stencil == RPAction::CLEAR) {
+		mask |= D3D11_CLEAR_STENCIL;
+	}
+	if (mask && curDepthStencilView_) {
+		context_->ClearDepthStencilView(curDepthStencilView_, mask, rp.clearDepth, rp.clearStencil);
 	}
 }
 
@@ -1509,12 +1545,17 @@ uintptr_t D3D11DrawContext::GetFramebufferAPITexture(Framebuffer *fbo, int chann
 
 void D3D11DrawContext::GetFramebufferDimensions(Framebuffer *fbo, int *w, int *h) {
 	D3D11Framebuffer *fb = (D3D11Framebuffer *)fbo;
-	*w = fb->width;
-	*h = fb->height;
+	if (fb) {
+		*w = fb->width;
+		*h = fb->height;
+	} else {
+		*w = bbWidth_;
+		*h = bbHeight_;
+	}
 }
 
-DrawContext *T3DCreateD3D11Context(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Device1 *device1, ID3D11DeviceContext1 *context1, D3D_FEATURE_LEVEL featureLevel, HWND hWnd) {
-	return new D3D11DrawContext(device, context, device1, context1, featureLevel, hWnd);
+DrawContext *T3DCreateD3D11Context(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Device1 *device1, ID3D11DeviceContext1 *context1, D3D_FEATURE_LEVEL featureLevel, HWND hWnd, std::vector<std::string> adapterNames) {
+	return new D3D11DrawContext(device, context, device1, context1, featureLevel, hWnd, adapterNames);
 }
 
 }  // namespace Draw

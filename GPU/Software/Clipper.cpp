@@ -39,6 +39,7 @@ enum {
 static inline int CalcClipMask(const ClipCoords& v)
 {
 	int mask = 0;
+	// This checks `x / w` compared to 1 or -1, skipping the division.
 	if (v.x > v.w) mask |= CLIP_POS_X_BIT;
 	if (v.x < -v.w) mask |= CLIP_NEG_X_BIT;
 	if (v.y > v.w) mask |= CLIP_POS_Y_BIT;
@@ -218,11 +219,15 @@ void ProcessRect(const VertexData& v0, const VertexData& v1)
 
 		RotateUVThrough(v0, v1, *topright, *bottomleft);
 
-		// Four triangles to do backfaces as well. Two of them will get backface culled.
-		Rasterizer::DrawTriangle(*topleft, *topright, *bottomright);
-		Rasterizer::DrawTriangle(*bottomright, *topright, *topleft);
-		Rasterizer::DrawTriangle(*bottomright, *bottomleft, *topleft);
-		Rasterizer::DrawTriangle(*topleft, *bottomleft, *bottomright);
+		if (gstate.isModeClear()) {
+			Rasterizer::ClearRectangle(v0, v1);
+		} else {
+			// Four triangles to do backfaces as well. Two of them will get backface culled.
+			Rasterizer::DrawTriangle(*topleft, *topright, *bottomright);
+			Rasterizer::DrawTriangle(*bottomright, *topright, *topleft);
+			Rasterizer::DrawTriangle(*bottomright, *bottomleft, *topleft);
+			Rasterizer::DrawTriangle(*topleft, *bottomleft, *bottomright);
+		}
 	}
 }
 
@@ -251,11 +256,7 @@ void ProcessLine(VertexData& v0, VertexData& v1)
 		return;
 	}
 
-	if (mask && (gstate.clipEnable & 0x1)) {
-		// discard if any vertex is outside the near clipping plane
-		if (mask & CLIP_NEG_Z_BIT)
-			return;
-
+	if (mask) {
 		CLIP_LINE(CLIP_POS_X_BIT, -1,  0,  0, 1);
 		CLIP_LINE(CLIP_NEG_X_BIT,  1,  0,  0, 1);
 		CLIP_LINE(CLIP_POS_Y_BIT,  0, -1,  0, 1);
@@ -299,11 +300,7 @@ void ProcessTriangle(VertexData& v0, VertexData& v1, VertexData& v2)
 	mask |= CalcClipMask(v1.clippos);
 	mask |= CalcClipMask(v2.clippos);
 
-	if (mask && (gstate.clipEnable & 0x1)) {
-		// discard if any vertex is outside the near clipping plane
-		if (mask & CLIP_NEG_Z_BIT)
-			return;
-
+	if (mask) {
 		for (int i = 0; i < 3; i += 3) {
 			int vlist[2][2*6+1];
 			int *inlist = vlist[0], *outlist = vlist[1];

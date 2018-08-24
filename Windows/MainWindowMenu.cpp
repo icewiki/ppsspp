@@ -20,6 +20,7 @@
 #include "GPU/Common/PostShader.h"
 #include "GPU/GLES/FramebufferManagerGLES.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/FileSystems/MetaFileSystem.h"
 #include "UI/OnScreenDisplay.h"
 #include "Windows/MainWindowMenu.h"
@@ -60,10 +61,11 @@ namespace MainWindow {
 		EnableMenuItem(menu, ID_FILE_LOADSTATEFILE, menuEnable);
 		EnableMenuItem(menu, ID_FILE_QUICKSAVESTATE, menuEnable);
 		EnableMenuItem(menu, ID_FILE_QUICKLOADSTATE, menuEnable);
-		EnableMenuItem(menu, ID_TOGGLE_PAUSE, menuEnable);
+		EnableMenuItem(menu, ID_EMULATION_PAUSE, menuEnable);
 		EnableMenuItem(menu, ID_EMULATION_STOP, menuEnable);
 		EnableMenuItem(menu, ID_EMULATION_RESET, menuEnable);
 		EnableMenuItem(menu, ID_EMULATION_SWITCH_UMD, umdSwitchEnable);
+		EnableMenuItem(menu, ID_TOGGLE_BREAK, menuEnable);
 		EnableMenuItem(menu, ID_DEBUG_LOADMAPFILE, menuEnable);
 		EnableMenuItem(menu, ID_DEBUG_SAVEMAPFILE, menuEnable);
 		EnableMenuItem(menu, ID_DEBUG_LOADSYMFILE, menuEnable);
@@ -167,11 +169,16 @@ namespace MainWindow {
 	}
 
 	bool CreateShadersSubmenu(HMENU menu) {
+		// NOTE: We do not load this until translations are loaded!
+		if (!I18NCategoryLoaded("PostShaders"))
+			return false;
+
 		// We only reload this initially and when a menu is actually opened.
 		if (!menuShaderInfoLoaded) {
 			ReloadAllPostShaderInfo();
 			menuShaderInfoLoaded = true;
 		}
+
 		std::vector<ShaderInfo> info = GetAllPostShaderInfo();
 
 		if (menuShaderInfo.size() == info.size() && std::equal(info.begin(), info.end(), menuShaderInfo.begin())) {
@@ -195,16 +202,21 @@ namespace MainWindow {
 		const char *translatedShaderName = nullptr;
 
 		availableShaders.clear();
-		for (auto i = info.begin(); i != info.end(); ++i) {
-			checkedStatus = MF_UNCHECKED;
-			availableShaders.push_back(i->section);
-			if (g_Config.sPostShaderName == i->section) {
-				checkedStatus = MF_CHECKED;
+		if (GetGPUBackend() == GPUBackend::DIRECT3D9) {
+			translatedShaderName = ps->T("Not available in Direct3D9 backend");
+			AppendMenu(shaderMenu, MF_STRING | MF_BYPOSITION | MF_GRAYED, item++, ConvertUTF8ToWString(translatedShaderName).c_str());
+		} else {
+			for (auto i = info.begin(); i != info.end(); ++i) {
+				checkedStatus = MF_UNCHECKED;
+				availableShaders.push_back(i->section);
+				if (g_Config.sPostShaderName == i->section) {
+					checkedStatus = MF_CHECKED;
+				}
+
+				translatedShaderName = ps->T(i->section.c_str(), i->name.c_str());
+
+				AppendMenu(shaderMenu, MF_STRING | MF_BYPOSITION | checkedStatus, item++, ConvertUTF8ToWString(translatedShaderName).c_str());
 			}
-
-			translatedShaderName = ps->T(i->section.c_str());
-
-			AppendMenu(shaderMenu, MF_STRING | MF_BYPOSITION | checkedStatus, item++, ConvertUTF8ToWString(translatedShaderName).c_str());
 		}
 
 		menuShaderInfo = info;
@@ -260,7 +272,7 @@ namespace MainWindow {
 		TranslateMenuItem(menu, ID_FILE_EXIT, L"\tAlt+F4");
 
 		// Emulation menu
-		TranslateMenuItem(menu, ID_TOGGLE_PAUSE, L"\tF8", "Pause");
+		TranslateMenuItem(menu, ID_EMULATION_PAUSE);
 		TranslateMenuItem(menu, ID_EMULATION_STOP, L"\tCtrl+W");
 		TranslateMenuItem(menu, ID_EMULATION_RESET, L"\tCtrl+B");
 		TranslateMenuItem(menu, ID_EMULATION_SWITCH_UMD, L"\tCtrl+U", "Switch UMD");
@@ -271,16 +283,17 @@ namespace MainWindow {
 		TranslateMenuItem(menu, ID_EMULATION_ROTATION_V_R);
 
 		// Debug menu
+		TranslateMenuItem(menu, ID_TOGGLE_BREAK, L"\tF8", "Break");
+		TranslateMenuItem(menu, ID_DEBUG_BREAKONLOAD);
+		TranslateMenuItem(menu, ID_DEBUG_IGNOREILLEGALREADS);
 		TranslateMenuItem(menu, ID_DEBUG_LOADMAPFILE);
 		TranslateMenuItem(menu, ID_DEBUG_SAVEMAPFILE);
 		TranslateMenuItem(menu, ID_DEBUG_LOADSYMFILE);
 		TranslateMenuItem(menu, ID_DEBUG_SAVESYMFILE);
 		TranslateMenuItem(menu, ID_DEBUG_RESETSYMBOLTABLE);
-		TranslateMenuItem(menu, ID_DEBUG_DUMPNEXTFRAME);
 		TranslateMenuItem(menu, ID_DEBUG_TAKESCREENSHOT, L"\tF12");
+		TranslateMenuItem(menu, ID_DEBUG_DUMPNEXTFRAME);
 		TranslateMenuItem(menu, ID_DEBUG_SHOWDEBUGSTATISTICS);
-		TranslateMenuItem(menu, ID_DEBUG_IGNOREILLEGALREADS);
-		TranslateMenuItem(menu, ID_DEBUG_RUNONLOAD);
 		TranslateMenuItem(menu, ID_DEBUG_DISASSEMBLY, L"\tCtrl+D");
 		TranslateMenuItem(menu, ID_DEBUG_GEDEBUGGER, L"\tCtrl+G");
 		TranslateMenuItem(menu, ID_DEBUG_EXTRACTFILE);
@@ -317,8 +330,6 @@ namespace MainWindow {
 		TranslateSubMenu(menu, "Rendering Mode", MENU_OPTIONS, SUBMENU_RENDERING_MODE);
 		TranslateMenuItem(menu, ID_OPTIONS_NONBUFFEREDRENDERING);
 		TranslateMenuItem(menu, ID_OPTIONS_BUFFEREDRENDERING);
-		TranslateMenuItem(menu, ID_OPTIONS_READFBOTOMEMORYCPU);
-		TranslateMenuItem(menu, ID_OPTIONS_READFBOTOMEMORYGPU);
 		TranslateSubMenu(menu, "Frame Skipping", MENU_OPTIONS, SUBMENU_FRAME_SKIPPING, L"\tF7");
 		TranslateMenuItem(menu, ID_OPTIONS_FRAMESKIP_AUTO);
 		TranslateMenuItem(menu, ID_OPTIONS_FRAMESKIP_0);
@@ -369,7 +380,7 @@ namespace MainWindow {
 	}
 
 	void BrowseAndBoot(std::string defaultPath, bool browseDirectory) {
-		static std::wstring filter = L"All supported file types (*.iso *.cso *.pbp *.elf *.prx *.zip)|*.pbp;*.elf;*.iso;*.cso;*.prx;*.zip|PSP ROMs (*.iso *.cso *.pbp *.elf *.prx)|*.pbp;*.elf;*.iso;*.cso;*.prx|Homebrew/Demos installers (*.zip)|*.zip|All files (*.*)|*.*||";
+		static std::wstring filter = L"All supported file types (*.iso *.cso *.pbp *.elf *.prx *.zip *.ppdmp)|*.pbp;*.elf;*.iso;*.cso;*.prx;*.zip;*.ppdmp|PSP ROMs (*.iso *.cso *.pbp *.elf *.prx)|*.pbp;*.elf;*.iso;*.cso;*.prx|Homebrew/Demos installers (*.zip)|*.zip|All files (*.*)|*.*||";
 		for (int i = 0; i < (int)filter.length(); i++) {
 			if (filter[i] == '|')
 				filter[i] = '\0';
@@ -399,18 +410,6 @@ namespace MainWindow {
 		} else {
 			if (GetUIState() == UISTATE_INGAME || GetUIState() == UISTATE_PAUSEMENU) {
 				Core_EnableStepping(false);
-			}
-
-			// TODO: What is this for / what does it fix?
-			if (browseDialog->GetType() != W32Util::AsyncBrowseDialog::DIR) {
-				// Decode the filename with fullpath.
-				char drive[MAX_PATH];
-				char dir[MAX_PATH];
-				char fname[MAX_PATH];
-				char ext[MAX_PATH];
-				_splitpath(filename.c_str(), drive, dir, fname, ext);
-
-				filename = std::string(drive) + std::string(dir) + std::string(fname) + std::string(ext);
 			}
 
 			filename = ReplaceAll(filename, "\\", "/");
@@ -474,9 +473,9 @@ namespace MainWindow {
 		g_Config.iInternalScreenRotation = rotation;
 	}
 
-	static void SaveStateActionFinished(bool result, const std::string &message, void *userdata) {
+	static void SaveStateActionFinished(SaveState::Status status, const std::string &message, void *userdata) {
 		if (!message.empty()) {
-			osm.Show(message, 2.0);
+			osm.Show(message, status == SaveState::Status::SUCCESS ? 2.0 : 5.0);
 		}
 		PostMessage(MainWindow::GetHWND(), WM_USER_SAVESTATE_FINISH, 0, 0);
 	}
@@ -501,15 +500,9 @@ namespace MainWindow {
 	}
 
 	static void setRenderingMode(int mode) {
-		if (mode >= FB_NON_BUFFERED_MODE)
-			g_Config.iRenderingMode = mode;
-		else {
-			if (++g_Config.iRenderingMode > FB_READFBOMEMORY_GPU)
-				g_Config.iRenderingMode = FB_NON_BUFFERED_MODE;
-		}
-
 		I18NCategory *gr = GetI18NCategory("Graphics");
 
+		g_Config.iRenderingMode = mode;
 		switch (g_Config.iRenderingMode) {
 		case FB_NON_BUFFERED_MODE:
 			osm.Show(gr->T("Non-Buffered Rendering"));
@@ -519,21 +512,9 @@ namespace MainWindow {
 		case FB_BUFFERED_MODE:
 			osm.Show(gr->T("Buffered Rendering"));
 			break;
-
-		case FB_READFBOMEMORY_CPU:
-			osm.Show(gr->T("Read Framebuffers To Memory (CPU)"));
-			break;
-
-		case FB_READFBOMEMORY_GPU:
-			osm.Show(gr->T("Read Framebuffers To Memory (GPU)"));
-			break;
 		}
 
 		NativeMessageReceived("gpu_resized", "");
-	}
-
-	static void setFpsLimit(int fps) {
-		g_Config.iFpsLimit = fps;
 	}
 
 	static void setFrameSkipping(int framesToSkip = -1) {
@@ -600,7 +581,7 @@ namespace MainWindow {
 			ShellExecute(NULL, L"open", ConvertUTF8ToWString(g_Config.memStickDirectory).c_str(), 0, 0, SW_SHOW);
 			break;
 
-		case ID_TOGGLE_PAUSE:
+		case ID_TOGGLE_BREAK:
 			if (GetUIState() == UISTATE_PAUSEMENU) {
 				// Causes hang
 				//NativeMessageReceived("run", "");
@@ -619,6 +600,11 @@ namespace MainWindow {
 					Core_EnableStepping(true);
 			}
 			noFocusPause = !noFocusPause;	// If we pause, override pause on lost focus
+			break;
+
+		case ID_EMULATION_PAUSE:
+			NativeMessageReceived("pause", "");
+			Core_EnableStepping(false);
 			break;
 
 		case ID_EMULATION_STOP:
@@ -743,6 +729,12 @@ namespace MainWindow {
 		case ID_OPTIONS_WINDOW2X:   SetWindowSize(2); break;
 		case ID_OPTIONS_WINDOW3X:   SetWindowSize(3); break;
 		case ID_OPTIONS_WINDOW4X:   SetWindowSize(4); break;
+		case ID_OPTIONS_WINDOW5X:   SetWindowSize(5); break;
+		case ID_OPTIONS_WINDOW6X:   SetWindowSize(6); break;
+		case ID_OPTIONS_WINDOW7X:   SetWindowSize(7); break;
+		case ID_OPTIONS_WINDOW8X:   SetWindowSize(8); break;
+		case ID_OPTIONS_WINDOW9X:   SetWindowSize(9); break;
+		case ID_OPTIONS_WINDOW10X:   SetWindowSize(10); break;
 
 		case ID_OPTIONS_RESOLUTIONDUMMY:
 		{
@@ -778,29 +770,27 @@ namespace MainWindow {
 			break;
 
 		case ID_OPTIONS_DIRECT3D9:
-			g_Config.iGPUBackend = GPU_BACKEND_DIRECT3D9;
+			g_Config.iGPUBackend = (int)GPUBackend::DIRECT3D9;
 			RestartApp();
 			break;
 
 		case ID_OPTIONS_DIRECT3D11:
-			g_Config.iGPUBackend = GPU_BACKEND_DIRECT3D11;
+			g_Config.iGPUBackend = (int)GPUBackend::DIRECT3D11;
 			RestartApp();
 			break;
 
 		case ID_OPTIONS_OPENGL:
-			g_Config.iGPUBackend = GPU_BACKEND_OPENGL;
+			g_Config.iGPUBackend = (int)GPUBackend::OPENGL;
 			RestartApp();
 			break;
 
 		case ID_OPTIONS_VULKAN:
-			g_Config.iGPUBackend = GPU_BACKEND_VULKAN;
+			g_Config.iGPUBackend = (int)GPUBackend::VULKAN;
 			RestartApp();
 			break;
 
 		case ID_OPTIONS_NONBUFFEREDRENDERING:   setRenderingMode(FB_NON_BUFFERED_MODE); break;
 		case ID_OPTIONS_BUFFEREDRENDERING:      setRenderingMode(FB_BUFFERED_MODE); break;
-		case ID_OPTIONS_READFBOTOMEMORYCPU:     setRenderingMode(FB_READFBOMEMORY_CPU); break;
-		case ID_OPTIONS_READFBOTOMEMORYGPU:     setRenderingMode(FB_READFBOMEMORY_GPU); break;
 
 		case ID_DEBUG_SHOWDEBUGSTATISTICS:
 			g_Config.bShowDebugStats = !g_Config.bShowDebugStats;
@@ -835,7 +825,7 @@ namespace MainWindow {
 			PostMessage(hWnd, WM_CLOSE, 0, 0);
 			break;
 
-		case ID_DEBUG_RUNONLOAD:
+		case ID_DEBUG_BREAKONLOAD:
 			g_Config.bAutoRun = !g_Config.bAutoRun;
 			break;
 
@@ -924,14 +914,25 @@ namespace MainWindow {
 			} else if (info.type == FILETYPE_DIRECTORY) {
 				MessageBox(hWnd, L"Cannot extract directories.", L"Sorry", 0);
 			} else if (W32Util::BrowseForFileName(false, hWnd, L"Save file as...", 0, L"All files\0*.*\0\0", L"", fn)) {
-				FILE *fp = File::OpenCFile(fn, "wb");
 				u32 handle = pspFileSystem.OpenFile(filename, FILEACCESS_READ, "");
+				// Note: len may be in blocks.
+				size_t len = pspFileSystem.SeekFile(handle, 0, FILEMOVE_END);
+				bool isBlockMode = pspFileSystem.DevType(handle) == PSP_DEV_TYPE_BLOCK;
+
+				FILE *fp = File::OpenCFile(fn, "wb");
+				pspFileSystem.SeekFile(handle, 0, FILEMOVE_BEGIN);
 				u8 buffer[4096];
-				size_t bytes;
-				do {
-					bytes = pspFileSystem.ReadFile(handle, buffer, sizeof(buffer));
+				size_t bufferSize = isBlockMode ? sizeof(buffer) / 2048 : sizeof(buffer);
+				while (len > 0) {
+					// This is all in blocks, not bytes, if isBlockMode.
+					size_t remain = std::min(len, bufferSize);
+					size_t readSize = pspFileSystem.ReadFile(handle, buffer, remain);
+					if (readSize == 0)
+						break;
+					size_t bytes = isBlockMode ? readSize * 2048 : readSize;
 					fwrite(buffer, 1, bytes, fp);
-				} while (bytes == sizeof(buffer));
+					len -= readSize;
+				}
 				pspFileSystem.CloseFile(handle);
 				fclose(fp);
 			}
@@ -1058,11 +1059,11 @@ namespace MainWindow {
 		CHECKITEM(ID_DEBUG_IGNOREILLEGALREADS, g_Config.bIgnoreBadMemAccess);
 		CHECKITEM(ID_DEBUG_SHOWDEBUGSTATISTICS, g_Config.bShowDebugStats);
 		CHECKITEM(ID_OPTIONS_HARDWARETRANSFORM, g_Config.bHardwareTransform);
-		CHECKITEM(ID_DEBUG_RUNONLOAD, g_Config.bAutoRun);
+		CHECKITEM(ID_DEBUG_BREAKONLOAD, !g_Config.bAutoRun);
 		CHECKITEM(ID_OPTIONS_VERTEXCACHE, g_Config.bVertexCache);
 		CHECKITEM(ID_OPTIONS_SHOWFPS, g_Config.iShowFPSCounter);
 		CHECKITEM(ID_OPTIONS_FRAMESKIP_AUTO, g_Config.bAutoFrameSkip);
-		CHECKITEM(ID_OPTIONS_FRAMESKIP, g_Config.iFrameSkip != 0);
+		CHECKITEM(ID_OPTIONS_FRAMESKIP, g_Config.iFrameSkip != FRAMESKIP_OFF);
 		CHECKITEM(ID_OPTIONS_VSYNC, g_Config.bVSync);
 		CHECKITEM(ID_OPTIONS_TOPMOST, g_Config.bTopMost);
 		CHECKITEM(ID_OPTIONS_PAUSE_FOCUS, g_Config.bPauseOnLostFocus);
@@ -1120,11 +1121,17 @@ namespace MainWindow {
 			CheckMenuItem(menu, zoomitems[i], MF_BYCOMMAND | ((i == g_Config.iInternalResolution) ? MF_CHECKED : MF_UNCHECKED));
 		}
 
-		static const int windowSizeItems[4] = {
+		static const int windowSizeItems[10] = {
 			ID_OPTIONS_WINDOW1X,
 			ID_OPTIONS_WINDOW2X,
 			ID_OPTIONS_WINDOW3X,
 			ID_OPTIONS_WINDOW4X,
+			ID_OPTIONS_WINDOW5X,
+			ID_OPTIONS_WINDOW6X,
+			ID_OPTIONS_WINDOW7X,
+			ID_OPTIONS_WINDOW8X,
+			ID_OPTIONS_WINDOW9X,
+			ID_OPTIONS_WINDOW10X,
 		};
 
 		RECT rc;
@@ -1212,14 +1219,7 @@ namespace MainWindow {
 		static const int renderingmode[] = {
 			ID_OPTIONS_NONBUFFEREDRENDERING,
 			ID_OPTIONS_BUFFEREDRENDERING,
-			ID_OPTIONS_READFBOTOMEMORYCPU,
-			ID_OPTIONS_READFBOTOMEMORYGPU,
 		};
-		if (g_Config.iRenderingMode < FB_NON_BUFFERED_MODE)
-			g_Config.iRenderingMode = FB_NON_BUFFERED_MODE;
-
-		else if (g_Config.iRenderingMode > FB_READFBOMEMORY_GPU)
-			g_Config.iRenderingMode = FB_READFBOMEMORY_GPU;
 
 		for (int i = 0; i < ARRAY_SIZE(renderingmode); i++) {
 			CheckMenuItem(menu, renderingmode[i], MF_BYCOMMAND | ((i == g_Config.iRenderingMode) ? MF_CHECKED : MF_UNCHECKED));
@@ -1264,8 +1264,8 @@ namespace MainWindow {
 			CheckMenuItem(menu, savestateSlot[i], MF_BYCOMMAND | ((i == g_Config.iCurrentStateSlot) ? MF_CHECKED : MF_UNCHECKED));
 		}
 
-		switch (g_Config.iGPUBackend) {
-		case GPU_BACKEND_DIRECT3D9:
+		switch (GetGPUBackend()) {
+		case GPUBackend::DIRECT3D9:
 			EnableMenuItem(menu, ID_OPTIONS_DIRECT3D9, MF_GRAYED);
 			EnableMenuItem(menu, ID_OPTIONS_DIRECT3D11, MF_ENABLED);
 			EnableMenuItem(menu, ID_OPTIONS_OPENGL, MF_ENABLED);
@@ -1275,7 +1275,7 @@ namespace MainWindow {
 			CheckMenuItem(menu, ID_OPTIONS_OPENGL, MF_UNCHECKED);
 			CheckMenuItem(menu, ID_OPTIONS_VULKAN, MF_UNCHECKED);
 			break;
-		case GPU_BACKEND_OPENGL:
+		case GPUBackend::OPENGL:
 			EnableMenuItem(menu, ID_OPTIONS_DIRECT3D9, MF_ENABLED);
 			EnableMenuItem(menu, ID_OPTIONS_DIRECT3D11, MF_ENABLED);
 			EnableMenuItem(menu, ID_OPTIONS_OPENGL, MF_GRAYED);
@@ -1285,7 +1285,7 @@ namespace MainWindow {
 			CheckMenuItem(menu, ID_OPTIONS_OPENGL, MF_CHECKED);
 			CheckMenuItem(menu, ID_OPTIONS_VULKAN, MF_UNCHECKED);
 			break;
-		case GPU_BACKEND_VULKAN:
+		case GPUBackend::VULKAN:
 			EnableMenuItem(menu, ID_OPTIONS_DIRECT3D9, MF_ENABLED);
 			EnableMenuItem(menu, ID_OPTIONS_DIRECT3D11, MF_ENABLED);
 			EnableMenuItem(menu, ID_OPTIONS_OPENGL, MF_ENABLED);
@@ -1295,7 +1295,7 @@ namespace MainWindow {
 			CheckMenuItem(menu, ID_OPTIONS_OPENGL, MF_UNCHECKED);
 			CheckMenuItem(menu, ID_OPTIONS_VULKAN, MF_CHECKED);
 			break;
-		case GPU_BACKEND_DIRECT3D11:
+		case GPUBackend::DIRECT3D11:
 			EnableMenuItem(menu, ID_OPTIONS_DIRECT3D9, MF_ENABLED);
 			EnableMenuItem(menu, ID_OPTIONS_DIRECT3D11, MF_GRAYED);
 			EnableMenuItem(menu, ID_OPTIONS_OPENGL, MF_ENABLED);
@@ -1326,7 +1326,7 @@ namespace MainWindow {
 		lastGlobalUIState = GetUIState();
 
 		bool isPaused = Core_IsStepping() && GetUIState() == UISTATE_INGAME;
-		TranslateMenuItem(menu, ID_TOGGLE_PAUSE, L"\tF8", isPaused ? "Run" : "Pause");
+		TranslateMenuItem(menu, ID_TOGGLE_BREAK, L"\tF8", isPaused ? "Run" : "Break");
 	}
 
 	// Message handler for about box.

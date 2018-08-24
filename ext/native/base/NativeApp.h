@@ -45,18 +45,11 @@ bool NativeIsAtTopLevel();
 // The very first function to be called after NativeGetAppInfo. Even NativeMix is not called
 // before this, although it may be called at any point in time afterwards (on any thread!)
 // This functions must NOT call OpenGL. Main thread.
-void NativeInit(int argc, const char *argv[], const char *savegame_dir, const char *external_dir, const char *cache_dir, bool fs=false);
+void NativeInit(int argc, const char *argv[], const char *savegame_dir, const char *external_dir, const char *cache_dir);
 
 // Runs after NativeInit() at some point. May (and probably should) call OpenGL.
 // Should not initialize anything screen-size-dependent - do that in NativeResized.
-void NativeInitGraphics(GraphicsContext *graphicsContext);
-
-// Signals that you need to forget all buffered OpenGL resources,
-// like textures, vbo etc.
-void NativeDeviceLost();
-
-// Signals that it's time to recreate buffered OpenGL resources
-void NativeDeviceRestore();
+bool NativeInitGraphics(GraphicsContext *graphicsContext);
 
 // If you want to change DPI stuff (such as modifying dp_xres and dp_yres), this is the
 // place to do it. You should only read g_dpi_scale and pixel_xres and pixel_yres in this,
@@ -104,25 +97,11 @@ void NativeSetMixer(void* mixer);
 void NativeShutdownGraphics();
 void NativeShutdown();
 
-// Called on app.onCreate and app.onDestroy (?). Tells the app to save/restore
-// light state. If app was fully rebooted between these calls, it's okay if some minor
-// state is lost (position in level) but the level currently playihg, or the song
-// currently being edited, or whatever, should be restored properly. In this case,
-// firstTime will be set so that appropriate action can be taken (or not taken when
-// it's not set).
-//
-// Note that NativeRestore is always called on bootup.
-void NativeRestoreState(bool firstTime);  // onCreate
-void NativeSaveState();  // onDestroy
-
-void NativePermissionStatus(SystemPermission permission, PermissionStatus status);
-
 // Calls back into Java / SDL
-// These APIs must be implemented by every port (for example app-android.cpp, PCMain.cpp).
+// These APIs must be implemented by every port (for example app-android.cpp, SDLMain.cpp).
 // You are free to call these.
 void SystemToast(const char *text);
 void ShowKeyboard();
-void ShowAd(int x, int y, bool center_x);
 
 // Vibrate either takes a number of milliseconds to vibrate unconditionally,
 // or you can specify these constants for "standard" feedback. On Android,

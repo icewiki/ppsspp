@@ -15,7 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-
+#include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/Null/NullGpu.h"
 #include "GPU/GPUState.h"
 #include "GPU/ge_constants.h"
@@ -25,7 +25,17 @@
 #include "Core/HLE/sceKernelInterrupt.h"
 #include "Core/HLE/sceGe.h"
 
-NullGPU::NullGPU() : GPUCommon(nullptr, nullptr) { }
+class NullDrawEngine : public DrawEngineCommon {
+public:
+	void DispatchFlush() override {
+	}
+	void DispatchSubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertTypeID, int *bytesRead) override {
+	}
+};
+
+NullGPU::NullGPU() : GPUCommon(nullptr, nullptr) {
+	drawEngineCommon_ = new NullDrawEngine();
+}
 NullGPU::~NullGPU() { }
 
 void NullGPU::FastRunLoop(DisplayList &list) {
@@ -127,8 +137,8 @@ void NullGPU::ExecuteOp(u32 op, u32 diff) {
 		}
 		break;
 
-	case GE_CMD_CLIPENABLE:
-		DEBUG_LOG(G3D, "DL Clip Enable: %i   (ignoring)", data);
+	case GE_CMD_DEPTHCLAMPENABLE:
+		DEBUG_LOG(G3D, "DL Depth Clamp Enable: %i   (ignoring)", data);
 		//we always clip, this is opengl
 		break;
 
@@ -334,10 +344,8 @@ void NullGPU::ExecuteOp(u32 op, u32 diff) {
 				memcpy(dst, src, width * bpp);
 			}
 
-#ifndef MOBILE_DEVICE
 			CBreakPoints::ExecMemCheck(srcBasePtr + (srcY * srcStride + srcX) * bpp, false, height * srcStride * bpp, currentMIPS->pc);
 			CBreakPoints::ExecMemCheck(dstBasePtr + (srcY * dstStride + srcX) * bpp, true, height * dstStride * bpp, currentMIPS->pc);
-#endif
 
 			// TODO: Correct timing appears to be 1.9, but erring a bit low since some of our other timing is inaccurate.
 			cyclesExecuted += ((height * width * bpp) * 16) / 10;

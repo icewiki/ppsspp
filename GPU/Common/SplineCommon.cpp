@@ -24,6 +24,7 @@
 #include "Common/MemoryUtil.h"
 #include "Core/Config.h"
 
+#include "GPU/Common/GPUStateUtils.h"
 #include "GPU/Common/SplineCommon.h"
 #include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/ge_constants.h"
@@ -79,7 +80,7 @@ inline __m128 SSENormalizeMultiplier(bool useSSE4, __m128 v)
 
 
 
-static void CopyQuad(u8 *&dest, const SimpleVertex *v1, const SimpleVertex *v2, const SimpleVertex* v3, const SimpleVertex *v4) {
+static void CopyQuad(u8 *&dest, const SimpleVertex *v1, const SimpleVertex *v2, const SimpleVertex *v3, const SimpleVertex *v4) {
 	int vertexSize = sizeof(SimpleVertex);
 	memcpy(dest, v1, vertexSize);
 	dest += vertexSize;
@@ -221,6 +222,13 @@ static void spline_knot(int n, int type, float *knot) {
 		knot[n + 3] = (float)(n - 2);
 		knot[n + 4] = (float)(n - 2);
 	}
+}
+
+bool CanUseHardwareTessellation(GEPatchPrimType prim) {
+	if (g_Config.bHardwareTessellation && !g_Config.bSoftwareRendering) {
+		return CanUseHardwareTransform(PatchPrimToPrim(prim));
+	}
+	return false;
 }
 
 // Prepare mesh of one patch for "Instanced Tessellation".
@@ -458,7 +466,7 @@ static void SplinePatchFullQuality(u8 *&dest, u16 *indices, int &count, const Sp
 							OutputDebugStringA(temp);
 							Crash();
 						}*/
-						SimpleVertex *a = spatch.points[idx];
+						const SimpleVertex *a = spatch.points[idx];
 						AccumulateWeighted(vert_pos, a->pos, fv);
 						if (origTc) {
 							vert->uv[0] += a->uv[0] * f;
@@ -833,16 +841,13 @@ void TessellateBezierPatch(u8 *&dest, u16 *&indices, int &count, int tess_u, int
 		_BezierPatchLowQuality(dest, indices, count, tess_u, tess_v, patch, origVertType);
 		break;
 	case MEDIUM_QUALITY:
-		_BezierPatchHighQuality(dest, indices, count, tess_u / 2, tess_v / 2, patch, origVertType);
+		_BezierPatchHighQuality(dest, indices, count, std::max(tess_u / 2, 1), std::max(tess_v / 2, 1), patch, origVertType);
 		break;
 	case HIGH_QUALITY:
 		_BezierPatchHighQuality(dest, indices, count, tess_u, tess_v, patch, origVertType);
 		break;
 	}
 }
-
-// This maps GEPatchPrimType to GEPrimitiveType.
-const GEPrimitiveType primType[] = { GE_PRIM_TRIANGLES, GE_PRIM_LINES, GE_PRIM_POINTS, GE_PRIM_POINTS };
 
 void DrawEngineCommon::SubmitSpline(const void *control_points, const void *indices, int tess_u, int tess_v, int count_u, int count_v, int type_u, int type_v, GEPatchPrimType prim_type, bool computeNormals, bool patchFacing, u32 vertType, int *bytesRead) {
 	PROFILE_THIS_SCOPE("spline");
@@ -877,7 +882,7 @@ void DrawEngineCommon::SubmitSpline(const void *control_points, const void *indi
 	}
 
 	// TODO: Do something less idiotic to manage this buffer
-	SimpleVertex **points = new SimpleVertex *[count_u * count_v];
+	auto points = new const SimpleVertex *[count_u * count_v];
 
 	// Make an array of pointers to the control points, to get rid of indices.
 	for (int idx = 0; idx < count_u * count_v; idx++) {
@@ -900,21 +905,29 @@ void DrawEngineCommon::SubmitSpline(const void *control_points, const void *indi
 	patch.primType = prim_type;
 	patch.patchFacing = patchFacing;
 
-	if (g_Config.bHardwareTessellation && g_Config.bHardwareTransform && !g_Config.bSoftwareRendering) {
-	
+	if (CanUseHardwareTessellation(prim_type)) {
 		float *pos = (float*)(decoded + 65536 * 18); // Size 4 float
 		float *tex = pos + count_u * count_v * 4; // Size 4 float
 		float *col = tex + count_u * count_v * 4; // Size 4 float
 		const bool hasColor = (origVertType & GE_VTYPE_COL_MASK) != 0;
 		const bool hasTexCoords = (origVertType & GE_VTYPE_TC_MASK) != 0;
 
-		tessDataTransfer->PrepareBuffers(pos, tex, col, count_u * count_v, hasColor, hasTexCoords);
+		int posStride, texStride, colStride;
+		tessDataTransfer->PrepareBuffers(pos, tex, col, posStride, texStride, colStride, count_u * count_v, hasColor, hasTexCoords);
+		float *p = pos;
+		float *t = tex;
+		float *c = col;
 		for (int idx = 0; idx < count_u * count_v; idx++) {
-			memcpy(pos + idx * 4, points[idx]->pos.AsArray(), 3 * sizeof(float));
-			if (hasTexCoords)
-				memcpy(tex + idx * 4, points[idx]->uv, 2 * sizeof(float));
-			if (hasColor)
-				memcpy(col + idx * 4, Vec4f::FromRGBA(points[idx]->color_32).AsArray(), 4 * sizeof(float));
+			memcpy(p, points[idx]->pos.AsArray(), 3 * sizeof(float));
+			p += posStride;
+			if (hasTexCoords) {
+				memcpy(t, points[idx]->uv, 2 * sizeof(float));
+				t += texStride;
+			}
+			if (hasColor) {
+				memcpy(c, Vec4f::FromRGBA(points[idx]->color_32).AsArray(), 4 * sizeof(float));
+				c += colStride;
+			}
 		}
 		if (!hasColor)
 			memcpy(col, Vec4f::FromRGBA(points[0]->color_32).AsArray(), 4 * sizeof(float));
@@ -940,8 +953,10 @@ void DrawEngineCommon::SubmitSpline(const void *control_points, const void *indi
 		gstate_c.uv.vOff = 0.0f;
 	}
 
+	uint32_t vertTypeID = GetVertTypeID(vertTypeWithIndex16, gstate.getUVGenMode());
+
 	int generatedBytesRead;
-	DispatchSubmitPrim(splineBuffer, quadIndices_, primType[prim_type], count, vertTypeWithIndex16, &generatedBytesRead);
+	DispatchSubmitPrim(splineBuffer, quadIndices_, PatchPrimToPrim(prim_type), count, vertTypeID, &generatedBytesRead);
 
 	DispatchFlush();
 
@@ -985,7 +1000,6 @@ void DrawEngineCommon::SubmitBezier(const void *control_points, const void *indi
 		ERROR_LOG(G3D, "Something went really wrong, vertex size: %i vs %i", vertexSize, (int)sizeof(SimpleVertex));
 	}
 
-
 	float *pos = (float*)(decoded + 65536 * 18); // Size 4 float
 	float *tex = pos + count_u * count_v * 4; // Size 4 float
 	float *col = tex + count_u * count_v * 4; // Size 4 float
@@ -996,18 +1010,27 @@ void DrawEngineCommon::SubmitBezier(const void *control_points, const void *indi
 	int num_patches_u = (count_u - 1) / 3;
 	int num_patches_v = (count_v - 1) / 3;
 	BezierPatch *patches = nullptr;
-	if (g_Config.bHardwareTessellation && g_Config.bHardwareTransform && !g_Config.bSoftwareRendering) {
-		tessDataTransfer->PrepareBuffers(pos, tex, col, count_u * count_v, hasColor, hasTexCoords);
+	if (CanUseHardwareTessellation(prim_type)) {
+		int posStride, texStride, colStride;
+		tessDataTransfer->PrepareBuffers(pos, tex, col, posStride, texStride, colStride, count_u * count_v, hasColor, hasTexCoords);
+		float *p = pos;
+		float *t = tex;
+		float *c = col;
 		for (int idx = 0; idx < count_u * count_v; idx++) {
-			SimpleVertex *point = simplified_control_points + (indices ? idxConv.convert(idx) : idx);
-			memcpy(pos + idx * 4, point->pos.AsArray(), 3 * sizeof(float));
-			if (hasTexCoords)
-				memcpy(tex + idx * 4, point->uv, 2 * sizeof(float));
-			if (hasColor)
-				memcpy(col + idx * 4, Vec4f::FromRGBA(point->color_32).AsArray(), 4 * sizeof(float));
+			const SimpleVertex *point = simplified_control_points + (indices ? idxConv.convert(idx) : idx);
+			memcpy(p, point->pos.AsArray(), 3 * sizeof(float));
+			p += posStride;
+			if (hasTexCoords) {
+				memcpy(t, point->uv, 2 * sizeof(float));
+				t += texStride;
+			}
+			if (hasColor) {
+				memcpy(c, Vec4f::FromRGBA(point->color_32).AsArray(), 4 * sizeof(float));
+				c += colStride;
+			}
 		}
 		if (!hasColor) {
-			SimpleVertex *point = simplified_control_points + (indices ? idxConv.convert(0) : 0);
+			const SimpleVertex *point = simplified_control_points + (indices ? idxConv.convert(0) : 0);
 			memcpy(col, Vec4f::FromRGBA(point->color_32).AsArray(), 4 * sizeof(float));
 		}
 	} else {
@@ -1044,7 +1067,7 @@ void DrawEngineCommon::SubmitBezier(const void *control_points, const void *indi
 	}
 
 	u16 *inds = quadIndices_;
-	if (g_Config.bHardwareTessellation && g_Config.bHardwareTransform && !g_Config.bSoftwareRendering) {
+	if (CanUseHardwareTessellation(prim_type)) {
 		tessDataTransfer->SendDataToShader(pos, tex, col, count_u * count_v, hasColor, hasTexCoords);
 		TessellateBezierPatchHardware(dest, inds, count, tess_u, tess_v, prim_type);
 		numPatches = num_patches_u * num_patches_v;
@@ -1074,8 +1097,9 @@ void DrawEngineCommon::SubmitBezier(const void *control_points, const void *indi
 		gstate_c.uv.vOff = 0;
 	}
 
+	uint32_t vertTypeID = GetVertTypeID(vertTypeWithIndex16, gstate.getUVGenMode());
 	int generatedBytesRead;
-	DispatchSubmitPrim(splineBuffer, quadIndices_, primType[prim_type], count, vertTypeWithIndex16, &generatedBytesRead);
+	DispatchSubmitPrim(splineBuffer, quadIndices_, PatchPrimToPrim(prim_type), count, vertTypeID, &generatedBytesRead);
 
 	DispatchFlush();
 

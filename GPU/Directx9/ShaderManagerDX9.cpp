@@ -41,7 +41,7 @@
 
 namespace DX9 {
 
-PSShader::PSShader(LPDIRECT3DDEVICE9 device, ShaderID id, const char *code) : id_(id), shader(nullptr), failed_(false) {
+PSShader::PSShader(LPDIRECT3DDEVICE9 device, FShaderID id, const char *code) : id_(id), shader(nullptr), failed_(false) {
 	source_ = code;
 #ifdef SHADERLOG
 	OutputDebugString(ConvertUTF8ToWString(code).c_str());
@@ -91,7 +91,7 @@ std::string PSShader::GetShaderString(DebugShaderStringType type) const {
 	}
 }
 
-VSShader::VSShader(LPDIRECT3DDEVICE9 device, ShaderID id, const char *code, bool useHWTransform) : id_(id), shader(nullptr), failed_(false), useHWTransform_(useHWTransform) {
+VSShader::VSShader(LPDIRECT3DDEVICE9 device, VShaderID id, const char *code, bool useHWTransform) : id_(id), shader(nullptr), failed_(false), useHWTransform_(useHWTransform) {
 	source_ = code;
 #ifdef SHADERLOG
 	OutputDebugString(ConvertUTF8ToWString(code).c_str());
@@ -147,9 +147,13 @@ void ShaderManagerDX9::PSSetColorUniform3(int creg, u32 color) {
 }
 
 void ShaderManagerDX9::PSSetColorUniform3Alpha255(int creg, u32 color, u8 alpha) {
-	float f[4];
-	Uint8x3ToFloat4_AlphaUint8(f, color, alpha);
-	device_->SetPixelShaderConstantF(creg, f, 1);
+	const float col[4] = {
+		(float)((color & 0xFF)),
+		(float)((color & 0xFF00) >> 8),
+		(float)((color & 0xFF0000) >> 16),
+		(float)alpha,
+	};
+	device_->SetPixelShaderConstantF(creg, col, 1);
 }
 
 void ShaderManagerDX9::PSSetFloat(int creg, float value) {
@@ -484,8 +488,8 @@ void ShaderManagerDX9::VSUpdateUniforms(u64 dirtyUniforms) {
 			}
 			VSSetFloat24Uniform3(CONST_VS_LIGHTDIR + i, &gstate.ldir[i * 3]);
 			VSSetFloat24Uniform3(CONST_VS_LIGHTATT + i, &gstate.latt[i * 3]);
-			VSSetFloat(CONST_VS_LIGHTANGLE + i, getFloat24(gstate.lcutoff[i]));
-			VSSetFloat(CONST_VS_LIGHTSPOTCOEF + i, getFloat24(gstate.lconv[i]));
+			float angle_spotCoef[4] = { getFloat24(gstate.lcutoff[i]), getFloat24(gstate.lconv[i]) };
+			VSSetFloatUniform4(CONST_VS_LIGHTANGLE_SPOTCOEF + i, angle_spotCoef);
 			VSSetColorUniform3(CONST_VS_LIGHTAMBIENT + i, gstate.lcolor[i * 3]);
 			VSSetColorUniform3(CONST_VS_LIGHTDIFFUSE + i, gstate.lcolor[i * 3 + 1]);
 			VSSetColorUniform3(CONST_VS_LIGHTSPECULAR + i, gstate.lcolor[i * 3 + 2]);
@@ -533,9 +537,11 @@ void ShaderManagerDX9::DirtyLastShader() { // disables vertex arrays
 }
 
 VSShader *ShaderManagerDX9::ApplyShader(int prim, u32 vertType) {
-	bool useHWTransform = CanUseHardwareTransform(prim);
+	// Always use software for flat shading to fix the provoking index.
+	bool tess = gstate_c.bezier || gstate_c.spline;
+	bool useHWTransform = CanUseHardwareTransform(prim) && (tess || gstate.getShadeMode() != GE_SHADE_FLAT);
 
-	ShaderID VSID;
+	VShaderID VSID;
 	if (gstate_c.IsDirty(DIRTY_VERTEXSHADER_STATE)) {
 		gstate_c.Clean(DIRTY_VERTEXSHADER_STATE);
 		ComputeVertexShaderID(&VSID, vertType, useHWTransform);
@@ -543,7 +549,7 @@ VSShader *ShaderManagerDX9::ApplyShader(int prim, u32 vertType) {
 		VSID = lastVSID_;
 	}
 
-	ShaderID FSID;
+	FShaderID FSID;
 	if (gstate_c.IsDirty(DIRTY_FRAGMENTSHADER_STATE)) {
 		gstate_c.Clean(DIRTY_FRAGMENTSHADER_STATE);
 		ComputeFragmentShaderID(&FSID);
@@ -656,7 +662,7 @@ std::string ShaderManagerDX9::DebugGetShaderString(std::string id, DebugShaderTy
 	switch (type) {
 	case SHADER_TYPE_VERTEX:
 	{
-		auto iter = vsCache_.find(shaderId);
+		auto iter = vsCache_.find(VShaderID(shaderId));
 		if (iter == vsCache_.end()) {
 			return "";
 		}
@@ -665,7 +671,7 @@ std::string ShaderManagerDX9::DebugGetShaderString(std::string id, DebugShaderTy
 
 	case SHADER_TYPE_FRAGMENT:
 	{
-		auto iter = fsCache_.find(shaderId);
+		auto iter = fsCache_.find(FShaderID(shaderId));
 		if (iter == fsCache_.end()) {
 			return "";
 		}

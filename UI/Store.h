@@ -29,7 +29,11 @@
 // set game specific settings, etc.
 // Uses GameInfoCache heavily to implement the functionality.
 
-struct json_value;
+namespace json {
+	struct JsonGet;
+}
+
+class ProductItemView;
 
 enum EntryType {
 	ENTRY_PBPZIP,
@@ -74,10 +78,11 @@ protected:
 private:
 	void SetFilter(const StoreFilter &filter);
 	void ParseListing(std::string json);
+	ProductItemView *GetSelectedItem();
 	std::vector<StoreEntry> FilterEntries();
 
 	std::string GetStoreJsonURL(std::string storePath) const;
-	std::string GetTranslatedString(const json_value *json, std::string key, const char *fallback = 0) const;
+	std::string GetTranslatedString(const json::JsonGet json, std::string key, const char *fallback = nullptr) const;
 
 	std::shared_ptr<http::Download> listing_;
 	std::shared_ptr<http::Download> image_;
@@ -86,8 +91,8 @@ private:
 	// local filesystems at the moment.
 	std::string storePath_;
 
-	bool loading_;
-	bool connectionError_;
+	bool loading_ = true;
+	bool connectionError_ = false;
 
 	std::map<std::string, StoreCategory> categories_;
 
@@ -97,7 +102,9 @@ private:
 
 	StoreFilter filter_;
 	std::string lang_;
+	std::string lastSelectedName_;
 
+	UI::ViewGroup *scrollItemView_;
 	UI::ViewGroup *productPanel_;
 	UI::TextView *titleText_;
 };

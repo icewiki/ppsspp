@@ -51,6 +51,9 @@ enum {
 	VIRTKEY_AXIS_SWAP = 0x40000013,
 	VIRTKEY_DEVMENU = 0x40000014,
 	VIRTKEY_FRAME_ADVANCE = 0x40000015,
+	VIRTKEY_RECORD = 0x40000016,
+	VIRTKEY_SPEED_CUSTOM1 = 0x40000017,
+	VIRTKEY_SPEED_CUSTOM2 = 0x40000018,
 	VIRTKEY_LAST,
 	VIRTKEY_COUNT = VIRTKEY_LAST - VIRTKEY_FIRST
 };
@@ -86,7 +89,7 @@ namespace KeyMap {
 	// Key & Button names
 	struct KeyMap_IntStrPair {
 		int key;
-		std::string name;
+		const char *name;
 	};
 
 	// Use if you need to display the textual name

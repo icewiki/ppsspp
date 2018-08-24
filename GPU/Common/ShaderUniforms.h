@@ -6,13 +6,12 @@
 
 // Used by the "modern" backends that use uniform buffers. They can share this without issue.
 
-// Pretty much full. Will need more bits for more fine grained dirty tracking for lights.
 enum : uint64_t {
 	DIRTY_BASE_UNIFORMS =
 	DIRTY_WORLDMATRIX | DIRTY_PROJTHROUGHMATRIX | DIRTY_VIEWMATRIX | DIRTY_TEXMATRIX | DIRTY_ALPHACOLORREF |
 	DIRTY_PROJMATRIX | DIRTY_FOGCOLOR | DIRTY_FOGCOEF | DIRTY_TEXENV | DIRTY_STENCILREPLACEVALUE |
 	DIRTY_ALPHACOLORMASK | DIRTY_SHADERBLEND | DIRTY_UVSCALEOFFSET | DIRTY_TEXCLAMP | DIRTY_DEPTHRANGE | DIRTY_MATAMBIENTALPHA |
-	DIRTY_BEZIERSPLINE,
+	DIRTY_BEZIERSPLINE | DIRTY_DEPAL,
 	DIRTY_LIGHT_UNIFORMS =
 	DIRTY_LIGHT0 | DIRTY_LIGHT1 | DIRTY_LIGHT2 | DIRTY_LIGHT3 |
 	DIRTY_MATDIFFUSE | DIRTY_MATSPECULAR | DIRTY_MATEMISSIVE | DIRTY_AMBIENT,
@@ -20,6 +19,7 @@ enum : uint64_t {
 
 // TODO: Split into two structs, one for software transform and one for hardware transform, to save space.
 // 512 bytes. Probably can't get to 256 (nVidia's UBO alignment).
+// Every line here is a 4-float.
 struct UB_VS_FS_Base {
 	float proj[16];
 	float proj_through[16];
@@ -28,12 +28,10 @@ struct UB_VS_FS_Base {
 	float tex[12];
 	float uvScaleOffset[4];
 	float depthRange[4];
-	float fogCoef_stencil[4];
+	float fogCoef[2];	float stencil; float pad0;
 	float matAmbient[4];
-	int spline_count_u;
-	int spline_count_v;
-	int spline_type_u;
-	int spline_type_v;
+	uint32_t spline_counts; uint32_t depal_mask_shift_off_fmt;  // 4 params packed into one.
+	int pad2; int pad3;
 	// Fragment data
 	float fogColor[4];
 	float texEnvColor[4];
@@ -53,12 +51,13 @@ R"(  mat4 proj_mtx;
   mat3x4 tex_mtx;
   vec4 uvscaleoffset;
   vec4 depthRange;
-  vec3 fogcoef_stencilreplace;
+  vec2 fogcoef;
+  float stencilReplace;
   vec4 matambientalpha;
-  int spline_count_u;
-  int spline_count_v;
-  int spline_type_u;
-  int spline_type_v;
+  uint spline_counts;
+  uint depal_mask_shift_off_fmt;
+  int pad2;
+  int pad3;
   vec3 fogcolor;
   vec3 texenv;
   ivec4 alphacolorref;
@@ -78,12 +77,13 @@ R"(  float4x4 u_proj;
   float4x3 u_tex;
   float4 u_uvscaleoffset;
   float4 u_depthRange;
-  float3 u_fogcoef_stencilreplace;
+  float2 u_fogcoef;
+  float u_stencilReplaceValue;
   float4 u_matambientalpha;
-  int u_spline_count_u;
-  int u_spline_count_v;
-  int u_spline_type_u;
-  int u_spline_type_v;
+  uint u_spline_counts;
+  uint u_depal_mask_shift_off_fmt;
+  int pad2;
+  int pad3;
   float3 u_fogcolor;
   float3 u_texenv;
   uint4 u_alphacolorref;
@@ -94,7 +94,8 @@ R"(  float4x4 u_proj;
   float2 u_texclampoff;
 )";
 
-// 576 bytes. Can we get down to 512?
+// 512 bytes. Would like to shrink more. Some colors only have 8-bit precision and we expand
+// them to float unnecessarily, could just as well expand in the shader.
 struct UB_VS_Lights {
 	float ambientColor[4];
 	float materialDiffuse[4];
@@ -103,8 +104,7 @@ struct UB_VS_Lights {
 	float lpos[4][4];
 	float ldir[4][4];
 	float latt[4][4];
-	float lightAngle[4][4];   // TODO: Merge with lightSpotCoef, use .xy
-	float lightSpotCoef[4][4];
+	float lightAngle_SpotCoef[4][4];   // TODO: Merge with lightSpotCoef, use .xy
 	float lightAmbient[4][4];
 	float lightDiffuse[4][4];
 	float lightSpecular[4][4];
@@ -118,8 +118,7 @@ R"(	vec4 u_ambient;
 	vec3 pos[4];
 	vec3 dir[4];
 	vec3 att[4];
-	float angle[4];
-	float spotCoef[4];
+	vec2 angle_spotCoef[4];
 	vec3 ambient[4];
 	vec3 diffuse[4];
 	vec3 specular[4];
@@ -143,14 +142,10 @@ R"(	float4 u_ambient;
 	float3 u_lightatt1;
 	float3 u_lightatt2;
 	float3 u_lightatt3;
-	float4 u_lightangle0;
-	float4 u_lightangle1;
-	float4 u_lightangle2;
-	float4 u_lightangle3;
-	float4 u_lightspotCoef0;
-	float4 u_lightspotCoef1;
-	float4 u_lightspotCoef2;
-	float4 u_lightspotCoef3;
+	float4 u_lightangle_spotCoef0;
+	float4 u_lightangle_spotCoef1;
+	float4 u_lightangle_spotCoef2;
+	float4 u_lightangle_spotCoef3;
 	float3 u_lightambient0;
 	float3 u_lightambient1;
 	float3 u_lightambient2;

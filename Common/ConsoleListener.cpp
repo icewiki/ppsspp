@@ -26,6 +26,9 @@
 #else
 #include <stdarg.h>
 #endif
+#ifndef _MSC_VER
+#include <unistd.h>
+#endif
 
 #include "ppsspp_config.h"
 #include "thread/threadutil.h"
@@ -66,6 +69,8 @@ ConsoleListener::ConsoleListener() : bHidden(true)
 #elif defined(IOS)
 	bUseColor = false;
 #elif PPSSPP_PLATFORM(UWP)
+	bUseColor = false;
+#elif defined(_MSC_VER)
 	bUseColor = false;
 #else
 	bUseColor = isatty(fileno(stdout));
@@ -595,7 +600,7 @@ void ConsoleListener::PixelSpace(int Left, int Top, int Width, int Height, bool 
 
 void ConsoleListener::Log(const LogMessage &msg) {
 	char Text[2048];
-	snprintf(Text, sizeof(Text), "%s %s", msg.header, msg.msg.c_str());
+	snprintf(Text, sizeof(Text), "%s %s %s", msg.timestamp, msg.header, msg.msg.c_str());
 	Text[sizeof(Text) - 2] = '\n';
 	Text[sizeof(Text) - 1] = '\0';
 

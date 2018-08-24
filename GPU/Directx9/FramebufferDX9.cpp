@@ -22,6 +22,7 @@
 #include "Core/Host.h"
 #include "Core/MemMap.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/System.h"
 #include "Core/Reporting.h"
 #include "GPU/ge_constants.h"
@@ -81,24 +82,8 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 	D3DDECL_END()
 };
 
-	void FramebufferManagerDX9::DisableState() {
-		dxstate.blend.disable();
-		dxstate.cullMode.set(false, false);
-		dxstate.depthTest.disable();
-		dxstate.scissorTest.disable();
-		dxstate.stencilTest.disable();
-		dxstate.colorMask.set(true, true, true, true);
-		dxstate.stencilMask.set(0xFF);
-		gstate_c.Dirty(DIRTY_BLEND_STATE | DIRTY_RASTER_STATE | DIRTY_DEPTHSTENCIL_STATE | DIRTY_VIEWPORTSCISSOR_STATE);
-	}
-
 	FramebufferManagerDX9::FramebufferManagerDX9(Draw::DrawContext *draw)
-		: FramebufferManagerCommon(draw),
-			drawPixelsTex_(0),
-			convBuf(0),
-			stencilUploadPS_(nullptr),
-			stencilUploadVS_(nullptr),
-			stencilUploadFailed_(false) {
+		: FramebufferManagerCommon(draw) {
 
 		device_ = (LPDIRECT3DDEVICE9)draw->GetNativeObject(Draw::NativeObject::DEVICE);
 		deviceEx_ = (LPDIRECT3DDEVICE9)draw->GetNativeObject(Draw::NativeObject::DEVICE_EX);
@@ -130,11 +115,8 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		if (drawPixelsTex_) {
 			drawPixelsTex_->Release();
 		}
-		for (auto it = tempFBOs_.begin(), end = tempFBOs_.end(); it != end; ++it) {
-			delete it->second.fbo;
-		}
-		for (auto it = offscreenSurfaces_.begin(), end = offscreenSurfaces_.end(); it != end; ++it) {
-			it->second.surface->Release();
+		for (auto &it : offscreenSurfaces_) {
+			it.second.surface->Release();
 		}
 		delete [] convBuf;
 		if (stencilUploadPS_) {
@@ -153,6 +135,11 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 	void FramebufferManagerDX9::SetShaderManager(ShaderManagerDX9 *sm) {
 		shaderManagerDX9_ = sm;
 		shaderManager_ = sm;
+	}
+
+	void FramebufferManagerDX9::SetDrawEngine(DrawEngineDX9 *td) {
+		drawEngineD3D9_ = td;
+		drawEngine_ = td;
 	}
 
 	void FramebufferManagerDX9::MakePixelTexture(const u8 *srcPixels, GEBufferFormat srcPixelFormat, int srcStride, int width, int height, float &u1, float &v1) {
@@ -244,7 +231,7 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 	}
 
 	void FramebufferManagerDX9::DrawActiveTexture(float x, float y, float w, float h, float destW, float destH, float u0, float v0, float u1, float v1, int uvRotation, int flags) {
-		// TODO: StretchRect instead?
+		// TODO: StretchRect instead when possible?
 		float coord[20] = {
 			x,y,0, u0,v0,
 			x+w,y,0, u1,v0,
@@ -292,19 +279,16 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		}
 		dxstate.texMipLodBias.set(0.0f);
 		dxstate.texMaxMipLevel.set(0);
-		device_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+		dxstate.blend.disable();
+		dxstate.cullMode.set(false, false);
+		dxstate.depthTest.disable();
+		dxstate.scissorTest.disable();
+		dxstate.stencilTest.disable();
+		dxstate.colorMask.set(true, true, true, true);
+		dxstate.stencilMask.set(0xFF);
 		HRESULT hr = device_->DrawPrimitiveUP(D3DPT_TRIANGLEFAN, 2, coord, 5 * sizeof(float));
 		if (FAILED(hr)) {
 			ERROR_LOG_REPORT(G3D, "DrawActiveTexture() failed: %08x", hr);
-		}
-	}
-
-	void FramebufferManagerDX9::RebindFramebuffer() {
-		if (currentRenderVfb_ && currentRenderVfb_->fbo) {
-			draw_->BindFramebufferAsRenderTarget(currentRenderVfb_->fbo, { Draw::RPAction::KEEP, Draw::RPAction::KEEP });
-		} else {
-			// Should this even happen?
-			draw_->BindFramebufferAsRenderTarget(nullptr, { Draw::RPAction::KEEP, Draw::RPAction::KEEP });
 		}
 	}
 
@@ -323,7 +307,7 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 			return;
 		}
 
-		draw_->BindFramebufferAsRenderTarget(vfb->fbo, { Draw::RPAction::CLEAR, Draw::RPAction::KEEP });
+		draw_->BindFramebufferAsRenderTarget(vfb->fbo, { Draw::RPAction::CLEAR, Draw::RPAction::KEEP, Draw::RPAction::KEEP });
 
 		// Technically, we should at this point re-interpret the bytes of the old format to the new.
 		// That might get tricky, and could cause unnecessary slowness in some games.
@@ -457,7 +441,7 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		}
 		if (!skipCopy && currentRenderVfb_ && framebuffer->fb_address == gstate.getFrameBufRawAddress()) {
 			// TODO: Maybe merge with bvfbs_?  Not sure if those could be packing, and they're created at a different size.
-			Draw::Framebuffer *renderCopy = GetTempFBO(framebuffer->renderWidth, framebuffer->renderHeight, (Draw::FBColorDepth)framebuffer->colorDepth);
+			Draw::Framebuffer *renderCopy = GetTempFBO(TempFBO::COPY, framebuffer->renderWidth, framebuffer->renderHeight, (Draw::FBColorDepth)framebuffer->colorDepth);
 			if (renderCopy) {
 				VirtualFramebuffer copyInfo = *framebuffer;
 				copyInfo.fbo = renderCopy;
@@ -473,65 +457,16 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		}
 	}
 
-	void FramebufferManagerDX9::ReadFramebufferToMemory(VirtualFramebuffer *vfb, bool sync, int x, int y, int w, int h) {
-		if (vfb) {
-			// We'll pseudo-blit framebuffers here to get a resized version of vfb.
-			VirtualFramebuffer *nvfb = FindDownloadTempBuffer(vfb);
-			OptimizeDownloadRange(vfb, x, y, w, h);
-			BlitFramebuffer(nvfb, x, y, vfb, x, y, w, h, 0);
-
-			PackFramebufferDirectx9_(nvfb, x, y, w, h);
-
-			textureCacheDX9_->ForgetLastTexture();
-			RebindFramebuffer();
-		}
-	}
-
-	void FramebufferManagerDX9::DownloadFramebufferForClut(u32 fb_address, u32 loadBytes) {
-		VirtualFramebuffer *vfb = GetVFBAt(fb_address);
-		if (vfb && vfb->fb_stride != 0) {
-			const u32 bpp = vfb->drawnFormat == GE_FORMAT_8888 ? 4 : 2;
-			int x = 0;
-			int y = 0;
-			int pixels = loadBytes / bpp;
-			// The height will be 1 for each stride or part thereof.
-			int w = std::min(pixels % vfb->fb_stride, (int)vfb->width);
-			int h = std::min((pixels + vfb->fb_stride - 1) / vfb->fb_stride, (int)vfb->height);
-
-			// We might still have a pending draw to the fb in question, flush if so.
-			FlushBeforeCopy();
-
-			// No need to download if we already have it.
-			if (!vfb->memoryUpdated && vfb->clutUpdatedBytes < loadBytes) {
-				// We intentionally don't call OptimizeDownloadRange() here - we don't want to over download.
-				// CLUT framebuffers are often incorrectly estimated in size.
-				if (x == 0 && y == 0 && w == vfb->width && h == vfb->height) {
-					vfb->memoryUpdated = true;
-				}
-				vfb->clutUpdatedBytes = loadBytes;
-
-				// We'll pseudo-blit framebuffers here to get a resized version of vfb.
-				VirtualFramebuffer *nvfb = FindDownloadTempBuffer(vfb);
-				BlitFramebuffer(nvfb, x, y, vfb, x, y, w, h, 0);
-
-				PackFramebufferDirectx9_(nvfb, x, y, w, h);
-
-				textureCacheDX9_->ForgetLastTexture();
-				RebindFramebuffer();
-			}
-		}
-	}
-
 	bool FramebufferManagerDX9::CreateDownloadTempBuffer(VirtualFramebuffer *nvfb) {
 		nvfb->colorDepth = Draw::FBO_8888;
 
-		nvfb->fbo = draw_->CreateFramebuffer({ nvfb->width, nvfb->height, 1, 1, true, (Draw::FBColorDepth)nvfb->colorDepth });
+		nvfb->fbo = draw_->CreateFramebuffer({ nvfb->bufferWidth, nvfb->bufferHeight, 1, 1, true, (Draw::FBColorDepth)nvfb->colorDepth });
 		if (!(nvfb->fbo)) {
 			ERROR_LOG(FRAMEBUF, "Error creating FBO! %i x %i", nvfb->renderWidth, nvfb->renderHeight);
 			return false;
 		}
 
-		draw_->BindFramebufferAsRenderTarget(nvfb->fbo, { Draw::RPAction::CLEAR, Draw::RPAction::CLEAR });
+		draw_->BindFramebufferAsRenderTarget(nvfb->fbo, { Draw::RPAction::CLEAR, Draw::RPAction::CLEAR, Draw::RPAction::CLEAR });
 		return true;
 	}
 
@@ -543,7 +478,7 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		if (!dst->fbo || !src->fbo || !useBufferedRendering_) {
 			// This can happen if we recently switched from non-buffered.
 			if (useBufferedRendering_)
-				draw_->BindFramebufferAsRenderTarget(nullptr, { Draw::RPAction::KEEP, Draw::RPAction::KEEP });
+				draw_->BindFramebufferAsRenderTarget(nullptr, { Draw::RPAction::KEEP, Draw::RPAction::KEEP, Draw::RPAction::KEEP });
 			return;
 		}
 
@@ -572,7 +507,7 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		// Direct3D 9 doesn't support rect -> self.
 		Draw::Framebuffer *srcFBO = src->fbo;
 		if (src == dst) {
-			Draw::Framebuffer *tempFBO = GetTempFBO(src->renderWidth, src->renderHeight, (Draw::FBColorDepth)src->colorDepth);
+			Draw::Framebuffer *tempFBO = GetTempFBO(TempFBO::BLIT, src->renderWidth, src->renderHeight, (Draw::FBColorDepth)src->colorDepth);
 			bool result = draw_->BlitFramebuffer(
 				src->fbo, srcX1, srcY1, srcX2, srcY2,
 				tempFBO, dstX1, dstY1, dstX2, dstY2,
@@ -590,23 +525,12 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		}
 	}
 
-	// TODO: SSE/NEON
-	// Could also make C fake-simd for 64-bit, two 8888 pixels fit in a register :)
-	void ConvertFromRGBA8888(u8 *dst, u8 *src, u32 dstStride, u32 srcStride, u32 width, u32 height, GEBufferFormat format) {
+	void ConvertFromBGRA8888(u8 *dst, u8 *src, u32 dstStride, u32 srcStride, u32 width, u32 height, GEBufferFormat format) {
 		// Must skip stride in the cases below.  Some games pack data into the cracks, like MotoGP.
 		const u32 *src32 = (const u32 *)src;
 
 		if (format == GE_FORMAT_8888) {
-			u32 *dst32 = (u32 *)dst;
-			if (src == dst) {
-				return;
-			} else {
-				for (u32 y = 0; y < height; ++y) {
-					ConvertBGRA8888ToRGBA8888(dst32, src32, width);
-					src32 += srcStride;
-					dst32 += dstStride;
-				}
-			}
+			ConvertFromBGRA8888(dst, src, dstStride, srcStride, width, height, Draw::DataFormat::R8G8B8A8_UNORM);
 		} else {
 			// But here it shouldn't matter if they do intersect
 			u16 *dst16 = (u16 *)dst;
@@ -640,7 +564,7 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		}
 	}
 
-	void FramebufferManagerDX9::PackFramebufferDirectx9_(VirtualFramebuffer *vfb, int x, int y, int w, int h) {
+	void FramebufferManagerDX9::PackFramebufferSync_(VirtualFramebuffer *vfb, int x, int y, int w, int h) {
 		if (!vfb->fbo) {
 			ERROR_LOG_REPORT_ONCE(vfbfbozero, SCEGE, "PackFramebufferDirectx9_: vfb->fbo == 0");
 			return;
@@ -670,7 +594,7 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 					// TODO: Handle the other formats?  We don't currently create them, I think.
 					const int dstByteOffset = (y * vfb->fb_stride + x) * dstBpp;
 					// Pixel size always 4 here because we always request BGRA8888.
-					ConvertFromRGBA8888(Memory::GetPointer(fb_address + dstByteOffset), (u8 *)locked.pBits, vfb->fb_stride, locked.Pitch / 4, w, h, vfb->format);
+					ConvertFromBGRA8888(Memory::GetPointer(fb_address + dstByteOffset), (u8 *)locked.pBits, vfb->fb_stride, locked.Pitch / 4, w, h, vfb->format);
 					offscreen->UnlockRect();
 				} else {
 					ERROR_LOG_REPORT(G3D, "Unable to lock rect from %08x: %d,%d %dx%d of %dx%d", fb_address, rect.left, rect.top, rect.right, rect.bottom, vfb->renderWidth, vfb->renderHeight);
@@ -737,32 +661,13 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		DestroyAllFBOs();
 	}
 
-	std::vector<FramebufferInfo> FramebufferManagerDX9::GetFramebufferList() {
-		std::vector<FramebufferInfo> list;
-
-		for (size_t i = 0; i < vfbs_.size(); ++i) {
-			VirtualFramebuffer *vfb = vfbs_[i];
-
-			FramebufferInfo info;
-			info.fb_address = vfb->fb_address;
-			info.z_address = vfb->z_address;
-			info.format = vfb->format;
-			info.width = vfb->width;
-			info.height = vfb->height;
-			info.fbo = vfb->fbo;
-			list.push_back(info);
-		}
-
-		return list;
-	}
-
 	void FramebufferManagerDX9::DecimateFBOs() {
 		FramebufferManagerCommon::DecimateFBOs();
 		for (auto it = offscreenSurfaces_.begin(); it != offscreenSurfaces_.end(); ) {
 			int age = frameLastFramebufUsed_ - it->second.last_frame_used;
 			if (age > FBO_OLD_AGE) {
 				it->second.surface->Release();
-				offscreenSurfaces_.erase(it++);
+				it = offscreenSurfaces_.erase(it);
 			} else {
 				++it;
 			}
@@ -788,27 +693,12 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 		}
 		bvfbs_.clear();
 
-		for (auto it = tempFBOs_.begin(), end = tempFBOs_.end(); it != end; ++it) {
-			delete it->second.fbo;
-		}
-		tempFBOs_.clear();
-
-		for (auto it = offscreenSurfaces_.begin(), end = offscreenSurfaces_.end(); it != end; ++it) {
-			it->second.surface->Release();
+		for (auto &it : offscreenSurfaces_) {
+			it.second.surface->Release();
 		}
 		offscreenSurfaces_.clear();
-		DisableState();
-	}
 
-	void FramebufferManagerDX9::FlushBeforeCopy() {
-		// Flush anything not yet drawn before blitting, downloading, or uploading.
-		// This might be a stalled list, or unflushed before a block transfer, etc.
-
-		// TODO: It's really bad that we are calling SetRenderFramebuffer here with
-		// all the irrelevant state checking it'll use to decide what to do. Should
-		// do something more focused here.
-		SetRenderFrameBuffer(gstate_c.IsDirty(DIRTY_FRAMEBUF), gstate_c.skipDrawReason);
-		drawEngine_->Flush();
+		SetNumExtraFBOs(0);
 	}
 
 	void FramebufferManagerDX9::Resized() {
@@ -849,9 +739,6 @@ static const D3DVERTEXELEMENT9 g_FramebufferVertexElements[] = {
 			LPDIRECT3DSURFACE9 offscreen = GetOffscreenSurface(renderTarget, vfb);
 			if (offscreen) {
 				success = GetRenderTargetFramebuffer(renderTarget, offscreen, w, h, buffer);
-			}
-			if (tempFBO) {
-				delete tempFBO;
 			}
 		}
 

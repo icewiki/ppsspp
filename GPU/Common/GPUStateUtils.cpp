@@ -22,6 +22,7 @@
 
 #include "Common/StringUtils.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/System.h"
 
 #include "GPU/ge_constants.h"
@@ -39,20 +40,28 @@ bool CanUseHardwareTransform(int prim) {
 	return !gstate.isModeThrough() && prim != GE_PRIM_RECTANGLES;
 }
 
-// Dest factors where it's safe to eliminate the alpha test under certain conditions
-static const bool safeDestFactors[16] = {
-	true, // GE_DSTBLEND_SRCCOLOR,
-	true, // GE_DSTBLEND_INVSRCCOLOR,
-	false, // GE_DSTBLEND_SRCALPHA,
-	true, // GE_DSTBLEND_INVSRCALPHA,
-	true, // GE_DSTBLEND_DSTALPHA,
-	true, // GE_DSTBLEND_INVDSTALPHA,
-	false, // GE_DSTBLEND_DOUBLESRCALPHA,
-	false, // GE_DSTBLEND_DOUBLEINVSRCALPHA,
-	true, // GE_DSTBLEND_DOUBLEDSTALPHA,
-	true, // GE_DSTBLEND_DOUBLEINVDSTALPHA,
-	true, //GE_DSTBLEND_FIXB,
-};
+bool NeedsTestDiscard() {
+	// We assume this is called only when enabled and not trivially true (may also be for color testing.)
+	if (gstate.isStencilTestEnabled() && (gstate.pmska & 0xFF) != 0xFF)
+		return true;
+	if (gstate.isDepthTestEnabled() && gstate.isDepthWriteEnabled())
+		return true;
+	if (!gstate.isAlphaBlendEnabled())
+		return true;
+	if (gstate.getBlendFuncA() != GE_SRCBLEND_SRCALPHA && gstate.getBlendFuncA() != GE_DSTBLEND_DOUBLESRCALPHA)
+		return true;
+	// GE_DSTBLEND_DOUBLEINVSRCALPHA is actually inverse double src alpha, and doubling zero is still zero.
+	if (gstate.getBlendFuncB() != GE_DSTBLEND_INVSRCALPHA && gstate.getBlendFuncB() != GE_DSTBLEND_DOUBLEINVSRCALPHA) {
+		if (gstate.getBlendFuncB() != GE_DSTBLEND_FIXB || gstate.getFixB() != 0xFFFFFF)
+			return true;
+	}
+	if (gstate.getBlendEq() != GE_BLENDMODE_MUL_AND_ADD && gstate.getBlendEq() != GE_BLENDMODE_MUL_AND_SUBTRACT_REVERSE)
+		return true;
+	if (gstate.isLogicOpEnabled() && gstate.getLogicOp() != GE_LOGIC_COPY)
+		return true;
+
+	return false;
+}
 
 bool IsAlphaTestTriviallyTrue() {
 	switch (gstate.getAlphaTestFunction()) {
@@ -79,25 +88,10 @@ bool IsAlphaTestTriviallyTrue() {
 
 	case GE_COMP_GREATER:
 	{
-#if 0
-		// Easy way to check the values in the debugger without ruining && early-out
-		bool doTextureAlpha = gstate.isTextureAlphaUsed();
-		bool stencilTest = gstate.isStencilTestEnabled();
-		bool depthTest = gstate.isDepthTestEnabled();
-		GEComparison depthTestFunc = gstate.getDepthTestFunction();
-		int alphaRef = gstate.getAlphaTestRef();
-		int blendA = gstate.getBlendFuncA();
-		bool blendEnabled = gstate.isAlphaBlendEnabled();
-		int blendB = gstate.getBlendFuncA();
-#endif
-		return (gstate_c.vertexFullAlpha && (gstate_c.textureFullAlpha || !gstate.isTextureAlphaUsed())) || (
-			(!gstate.isStencilTestEnabled() &&
-				!gstate.isDepthTestEnabled() &&
-				(!gstate.isLogicOpEnabled() || gstate.getLogicOp() == GE_LOGIC_COPY) &&
-				gstate.getAlphaTestRef() == 0 &&
-				gstate.isAlphaBlendEnabled() &&
-				gstate.getBlendFuncA() == GE_SRCBLEND_SRCALPHA &&
-				safeDestFactors[(int)gstate.getBlendFuncB()]));
+		// If the texture and vertex only use 1.0 alpha, then the ref value doesn't matter.
+		if (gstate_c.vertexFullAlpha && (gstate_c.textureFullAlpha || !gstate.isTextureAlphaUsed()))
+			return true;
+		return gstate.getAlphaTestRef() == 0 && !NeedsTestDiscard();
 	}
 
 	case GE_COMP_LEQUAL:
@@ -302,7 +296,7 @@ ReplaceBlendType ReplaceBlendWithShader(bool allowShaderBlend, GEBufferFormat bu
 		case GE_DSTBLEND_DOUBLESRCALPHA:
 			// We can't technically do this correctly (due to clamping) without reading the dst color.
 			// Using a copy isn't accurate either, though, when there's overlap.
-			if (gstate_c.featureFlags & GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH)
+			if (gstate_c.Supports(GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH))
 				return !allowShaderBlend ? REPLACE_BLEND_PRE_SRC_2X_ALPHA : REPLACE_BLEND_COPY_FBO;
 			return REPLACE_BLEND_PRE_SRC_2X_ALPHA;
 
@@ -444,14 +438,14 @@ ReplaceBlendType ReplaceBlendWithShader(bool allowShaderBlend, GEBufferFormat bu
 		case GE_DSTBLEND_DOUBLESRCALPHA:
 			if (funcA == GE_SRCBLEND_SRCALPHA || funcA == GE_SRCBLEND_INVSRCALPHA) {
 				// Can't safely double alpha, will clamp.  However, a copy may easily be worse due to overlap.
-				if (gstate_c.featureFlags & GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH)
+				if (gstate_c.Supports(GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH))
 					return !allowShaderBlend ? REPLACE_BLEND_PRE_SRC_2X_ALPHA : REPLACE_BLEND_COPY_FBO;
 				return REPLACE_BLEND_PRE_SRC_2X_ALPHA;
 			} else {
 				// This means dst alpha/color is used in the src factor.
 				// Unfortunately, copying here causes overlap problems in Silent Hill games (it seems?)
 				// We will just hope that doubling alpha for the dst factor will not clamp too badly.
-				if (gstate_c.featureFlags & GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH)
+				if (gstate_c.Supports(GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH))
 					return !allowShaderBlend ? REPLACE_BLEND_2X_ALPHA : REPLACE_BLEND_COPY_FBO;
 				return REPLACE_BLEND_2X_ALPHA;
 			}
@@ -507,6 +501,9 @@ static const float DEPTH_SLICE_FACTOR_16BIT = 256.0f;
 float DepthSliceFactor() {
 	if (gstate_c.Supports(GPU_SCALE_DEPTH_FROM_24BIT_TO_16BIT)) {
 		return DEPTH_SLICE_FACTOR_16BIT;
+	}
+	if (gstate_c.Supports(GPU_SUPPORTS_DEPTH_CLAMP)) {
+		return 1.0f;
 	}
 	return DEPTH_SLICE_FACTOR_HIGH;
 }
@@ -573,17 +570,11 @@ void ConvertViewportAndScissor(bool useBufferedRendering, float renderWidth, flo
 
 	// This is a bit of a hack as the render buffer isn't always that size
 	// We always scissor on non-buffered so that clears don't spill outside the frame.
-	if (useBufferedRendering && scissorX1 == 0 && scissorY1 == 0
-		&& scissorX2 >= (int)gstate_c.curRTWidth
-		&& scissorY2 >= (int)gstate_c.curRTHeight) {
-		out.scissorEnable = false;
-	} else {
-		out.scissorEnable = true;
-		out.scissorX = renderX + displayOffsetX + scissorX1 * renderWidthFactor;
-		out.scissorY = renderY + displayOffsetY + scissorY1 * renderHeightFactor;
-		out.scissorW = (scissorX2 - scissorX1) * renderWidthFactor;
-		out.scissorH = (scissorY2 - scissorY1) * renderHeightFactor;
-	}
+	out.scissorEnable = true;
+	out.scissorX = renderX + displayOffsetX + scissorX1 * renderWidthFactor;
+	out.scissorY = renderY + displayOffsetY + scissorY1 * renderHeightFactor;
+	out.scissorW = (scissorX2 - scissorX1) * renderWidthFactor;
+	out.scissorH = (scissorY2 - scissorY1) * renderHeightFactor;
 
 	int curRTWidth = gstate_c.curRTWidth;
 	int curRTHeight = gstate_c.curRTHeight;
@@ -681,10 +672,11 @@ void ConvertViewportAndScissor(bool useBufferedRendering, float renderWidth, flo
 		// So, we apply the depth range as minz/maxz, and transform for the viewport.
 		float vpZScale = gstate.getViewportZScale();
 		float vpZCenter = gstate.getViewportZCenter();
+		// TODO: This clip the entire draw if minz > maxz.
 		float minz = gstate.getDepthRangeMin();
 		float maxz = gstate.getDepthRangeMax();
 
-		if (gstate.isClippingEnabled() && (minz == 0 || maxz == 65535)) {
+		if (gstate.isDepthClampEnabled() && (minz == 0 || maxz == 65535)) {
 			// Here, we should "clamp."  But clamping per fragment would be slow.
 			// So, instead, we just increase the available range and hope.
 			// If depthSliceFactor is 4, it means (75% / 2) of the depth lies in each direction.
@@ -696,7 +688,6 @@ void ConvertViewportAndScissor(bool useBufferedRendering, float renderWidth, flo
 				maxz += fullDepthRange;
 			}
 		}
-
 		// Okay.  So, in our shader, -1 will map to minz, and +1 will map to maxz.
 		float halfActualZRange = (maxz - minz) * (1.0f / 2.0f);
 		float zScale = halfActualZRange < std::numeric_limits<float>::epsilon() ? 1.0f : vpZScale / halfActualZRange;
@@ -781,12 +772,10 @@ static const BlendEq eqLookup[] = {
 
 static BlendFactor toDualSource(BlendFactor blendfunc) {
 	switch (blendfunc) {
-#if !defined(USING_GLES2)   // TODO: Remove when we have better headers
 	case BlendFactor::SRC_ALPHA:
 		return BlendFactor::SRC1_ALPHA;
 	case BlendFactor::ONE_MINUS_SRC_ALPHA:
 		return BlendFactor::ONE_MINUS_SRC1_ALPHA;
-#endif
 	default:
 		return blendfunc;
 	}
@@ -1324,7 +1313,7 @@ void ConvertStencilFuncState(GenericStencilFuncState &state) {
 		return;
 
 	// The PSP's mask is reversed (bits not to write.)
-	state.writeMask = (~(gstate.pmska >> 0)) & 0xFF;
+	state.writeMask = (~gstate.pmska) & 0xFF;
 
 	state.sFail = gstate.getStencilOpSFail();
 	state.zFail = gstate.getStencilOpZFail();

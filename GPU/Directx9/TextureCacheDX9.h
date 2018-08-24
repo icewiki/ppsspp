@@ -49,13 +49,12 @@ public:
 		shaderManager_ = sm;
 	}
 
-	// Only used by Qt UI?
-	bool DecodeTexture(u8 *output, const GPUgstate &state);
-
 	void ForgetLastTexture() override;
 	void InvalidateLastTexture(TexCacheEntry *entry = nullptr) override;
 
 	void SetFramebufferSamplingParams(u16 bufferWidth, u16 bufferHeight);
+
+	bool GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level) override;
 
 protected:
 	void BindTexture(TexCacheEntry *entry) override;
@@ -64,13 +63,13 @@ protected:
 
 private:
 	void UpdateSamplingParams(TexCacheEntry &entry, bool force);
-	void LoadTextureLevel(TexCacheEntry &entry, ReplacedTexture &replaced, int level, int maxLevel, bool replaceImages, int scaleFactor, u32 dstFmt);
+	void LoadTextureLevel(TexCacheEntry &entry, ReplacedTexture &replaced, int level, int maxLevel, int scaleFactor, u32 dstFmt);
 	D3DFORMAT GetDestFormat(GETextureFormat format, GEPaletteFormat clutFormat) const;
-	TexCacheEntry::Status CheckAlpha(const u32 *pixelData, u32 dstFmt, int stride, int w, int h);
+	TexCacheEntry::TexStatus CheckAlpha(const u32 *pixelData, u32 dstFmt, int stride, int w, int h);
 	void UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutBase, bool clutIndexIsSimple) override;
 
 	void ApplyTextureFramebuffer(TexCacheEntry *entry, VirtualFramebuffer *framebuffer) override;
-	void BuildTexture(TexCacheEntry *const entry, bool replaceImages) override;
+	void BuildTexture(TexCacheEntry *const entry) override;
 
 	LPDIRECT3DTEXTURE9 &DxTex(TexCacheEntry *entry) {
 		return *(LPDIRECT3DTEXTURE9 *)&entry->texturePtr;

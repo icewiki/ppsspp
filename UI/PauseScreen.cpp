@@ -49,7 +49,7 @@ AsyncImageFileView::AsyncImageFileView(const std::string &filename, UI::ImageSiz
 AsyncImageFileView::~AsyncImageFileView() {}
 
 void AsyncImageFileView::GetContentDimensions(const UIContext &dc, float &w, float &h) const {
-	if (texture_) {
+	if (texture_ && texture_->GetTexture()) {
 		float texw = (float)texture_->Width();
 		float texh = (float)texture_->Height();
 		switch (sizeMode_) {
@@ -77,10 +77,20 @@ void AsyncImageFileView::SetFilename(std::string filename) {
 	}
 }
 
+void AsyncImageFileView::DeviceLost() {
+	if (texture_.get())
+		texture_->DeviceLost();
+}
+
+void AsyncImageFileView::DeviceRestored(Draw::DrawContext *draw) {
+	if (texture_.get())
+		texture_->DeviceRestored(draw);
+}
+
 void AsyncImageFileView::Draw(UIContext &dc) {
 	using namespace Draw;
 	if (!texture_ && !textureFailed_ && !filename_.empty()) {
-		texture_ = std::move(CreateTextureFromFile(dc.GetDrawContext(), filename_.c_str(), DETECT, true));
+		texture_ = CreateTextureFromFile(dc.GetDrawContext(), filename_.c_str(), DETECT, true);
 		if (!texture_.get())
 			textureFailed_ = true;
 	}
@@ -90,7 +100,7 @@ void AsyncImageFileView::Draw(UIContext &dc) {
 	}
 
 	// TODO: involve sizemode
-	if (texture_) {
+	if (texture_ && texture_->GetTexture()) {
 		dc.Flush();
 		dc.GetDrawContext()->BindTexture(0, texture_->GetTexture());
 		dc.Draw()->Rect(bounds_.x, bounds_.y, bounds_.w, bounds_.h, color_);
@@ -172,8 +182,8 @@ private:
 	UI::EventReturn OnSaveState(UI::EventParams &e);
 	UI::EventReturn OnLoadState(UI::EventParams &e);
 
-	UI::Button *saveStateButton_;
-	UI::Button *loadStateButton_;
+	UI::Button *saveStateButton_ = nullptr;
+	UI::Button *loadStateButton_ = nullptr;
 
 	int slot_;
 	std::string gamePath_;
@@ -228,9 +238,9 @@ void SaveSlotView::Draw(UIContext &dc) {
 	UI::LinearLayout::Draw(dc);
 }
 
-static void AfterSaveStateAction(bool status, const std::string &message, void *) {
+static void AfterSaveStateAction(SaveState::Status status, const std::string &message, void *) {
 	if (!message.empty()) {
-		osm.Show(message, 2.0);
+		osm.Show(message, status == SaveState::Status::SUCCESS ? 2.0 : 5.0);
 	}
 }
 
@@ -334,12 +344,17 @@ void GamePauseScreen::CreateViews() {
 
 	// TODO, also might be nice to show overall compat rating here?
 	// Based on their platform or even cpu/gpu/config.  Would add an API for it.
-	if (Reporting::IsSupported() && gameId.size() && gameId != "_") {
+	if (Reporting::IsSupported() && g_paramSFO.GetValueString("DISC_ID").size()) {
 		I18NCategory *rp = GetI18NCategory("Reporting");
 		rightColumnItems->Add(new Choice(rp->T("ReportButton", "Report Feedback")))->OnClick.Handle(this, &GamePauseScreen::OnReportFeedback);
 	}
 	rightColumnItems->Add(new Spacer(25.0));
-	rightColumnItems->Add(new Choice(pa->T("Exit to menu")))->OnClick.Handle(this, &GamePauseScreen::OnExitToMenu);
+	if (g_Config.bPauseMenuExitsEmulator) {
+		I18NCategory *mm = GetI18NCategory("MainMenu");
+		rightColumnItems->Add(new Choice(mm->T("Exit")))->OnClick.Handle(this, &GamePauseScreen::OnExitToMenu);
+	} else {
+		rightColumnItems->Add(new Choice(pa->T("Exit to menu")))->OnClick.Handle(this, &GamePauseScreen::OnExitToMenu);
+	}
 }
 
 UI::EventReturn GamePauseScreen::OnGameSettings(UI::EventParams &e) {
@@ -358,7 +373,7 @@ void GamePauseScreen::dialogFinished(const Screen *dialog, DialogResult dr) {
 		ScreenshotViewScreen *s = (ScreenshotViewScreen *)dialog;
 		int slot = s->GetSlot();
 		g_Config.iCurrentStateSlot = slot;
-		SaveState::LoadSlot(gamePath_, slot, SaveState::Callback(), 0);
+		SaveState::LoadSlot(gamePath_, slot, &AfterSaveStateAction);
 
 		finishNextFrame_ = true;
 	} else {
@@ -382,7 +397,11 @@ UI::EventReturn GamePauseScreen::OnScreenshotClicked(UI::EventParams &e) {
 }
 
 UI::EventReturn GamePauseScreen::OnExitToMenu(UI::EventParams &e) {
-	TriggerFinish(DR_OK);
+	if (g_Config.bPauseMenuExitsEmulator) {
+		System_SendMessage("finish", "");
+	} else {
+		TriggerFinish(DR_OK);
+	}
 	return UI::EVENT_DONE;
 }
 
@@ -433,6 +452,7 @@ UI::EventReturn GamePauseScreen::OnCreateConfig(UI::EventParams &e)
 	screenManager()->topScreen()->RecreateViews();
 	return UI::EVENT_DONE;
 }
+
 UI::EventReturn GamePauseScreen::OnDeleteConfig(UI::EventParams &e)
 {
 	I18NCategory *di = GetI18NCategory("Dialog");
@@ -442,14 +462,4 @@ UI::EventReturn GamePauseScreen::OnDeleteConfig(UI::EventParams &e)
 		std::bind(&GamePauseScreen::CallbackDeleteConfig, this, std::placeholders::_1)));
 
 	return UI::EVENT_DONE;
-}
-
-
-void GamePauseScreen::sendMessage(const char *message, const char *value) {
-	UIDialogScreenWithGameBackground::sendMessage(message, value);
-	// Since the language message isn't allowed to be in native, we have to have add this
-	// to every screen which directly inherits from UIScreen(which are few right now, luckily).
-	if (!strcmp(message, "language")) {
-		screenManager()->RecreateAllViews();
-	}
 }

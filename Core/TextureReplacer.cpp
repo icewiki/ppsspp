@@ -15,7 +15,9 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#ifndef USING_QT_UI
+#ifdef USING_QT_UI
+#include <QtGui/QImage>
+#else
 #include <libpng17/png.h>
 #endif
 
@@ -33,9 +35,9 @@
 static const std::string INI_FILENAME = "textures.ini";
 static const std::string NEW_TEXTURE_DIR = "new/";
 static const int VERSION = 1;
-static const int MAX_MIP_LEVELS = 64;
+static const int MAX_MIP_LEVELS = 12;  // 12 should be plenty, 8 is the max mip levels supported by the PSP.
 
-TextureReplacer::TextureReplacer() : enabled_(false), allowVideo_(false), ignoreAddress_(false), hash_(ReplacedTextureHash::QUICK) {
+TextureReplacer::TextureReplacer() {
 	none_.alphaStatus_ = ReplacedTextureAlpha::UNKNOWN;
 }
 
@@ -171,7 +173,7 @@ void TextureReplacer::ParseHashRange(const std::string &key, const std::string &
 		return;
 	}
 
-	const u64 rangeKey = ((u64)addr << 32) | (fromW << 16) | fromH;
+	const u64 rangeKey = ((u64)addr << 32) | ((u64)fromW << 16) | fromH;
 	hashranges_[rangeKey] = WidthHeightPair(toW, toH);
 }
 
@@ -279,12 +281,20 @@ void TextureReplacer::PopulateReplacement(ReplacedTexture *result, u64 cachekey,
 			break;
 		}
 
+		bool good = false;
 		ReplacedTextureLevel level;
 		level.fmt = ReplacedTextureFormat::F_8888;
 		level.file = filename;
 
 #ifdef USING_QT_UI
-		ERROR_LOG(G3D, "Replacement texture loading not implemented for Qt");
+		QImage image(filename.c_str(), "PNG");
+		if (image.isNull()) {
+			ERROR_LOG(G3D, "Could not load texture replacement info: %s", filename.c_str());
+		} else {
+			level.w = (image.width() * w) / newW;
+			level.h = (image.height() * h) / newH;
+			good = true;
+		}
 #else
 		png_image png = {};
 		png.version = PNG_IMAGE_VERSION;
@@ -293,8 +303,7 @@ void TextureReplacer::PopulateReplacement(ReplacedTexture *result, u64 cachekey,
 			// We pad files that have been hashrange'd so they are the same texture size.
 			level.w = (png.width * w) / newW;
 			level.h = (png.height * h) / newH;
-
-			result->levels_.push_back(level);
+			good = true;
 		} else {
 			ERROR_LOG(G3D, "Could not load texture replacement info: %s - %s", filename.c_str(), png.message);
 		}
@@ -302,6 +311,20 @@ void TextureReplacer::PopulateReplacement(ReplacedTexture *result, u64 cachekey,
 
 		png_image_free(&png);
 #endif
+
+		if (good && i != 0) {
+			// Check that the mipmap size is correct.  Can't load mips of the wrong size.
+			if (level.w != (result->levels_[0].w >> i) || level.h != (result->levels_[0].h >> i)) {
+				 WARN_LOG(G3D, "Replacement mipmap invalid: size=%dx%d, expected=%dx%d (level %d, '%s')", level.w, level.h, result->levels_[0].w >> i, result->levels_[0].h >> i, i, filename.c_str());
+				 good = false;
+			}
+		}
+
+		if (good)
+			result->levels_.push_back(level);
+		// Otherwise, we're done loading mips (bad PNG or bad size, either way.)
+		else
+			break;
 	}
 
 	result->alphaStatus_ = ReplacedTextureAlpha::UNKNOWN;
@@ -511,7 +534,7 @@ std::string TextureReplacer::HashName(u64 cachekey, u32 hash, int level) {
 }
 
 bool TextureReplacer::LookupHashRange(u32 addr, int &w, int &h) {
-	const u64 rangeKey = ((u64)addr << 32) | (w << 16) | h;
+	const u64 rangeKey = ((u64)addr << 32) | ((u64)w << 16) | h;
 	auto range = hashranges_.find(rangeKey);
 	if (range != hashranges_.end()) {
 		const WidthHeightPair &wh = range->second;
@@ -530,7 +553,32 @@ void ReplacedTexture::Load(int level, void *out, int rowPitch) {
 	const ReplacedTextureLevel &info = levels_[level];
 
 #ifdef USING_QT_UI
-	ERROR_LOG(G3D, "Replacement texture loading not implemented for Qt");
+	QImage image(info.file.c_str(), "PNG");
+	if (image.isNull()) {
+		ERROR_LOG(G3D, "Could not load texture replacement info: %s", info.file.c_str());
+		return;
+	}
+
+	image = image.convertToFormat(QImage::Format_ARGB32);
+	bool alphaFull = true;
+	for (int y = 0; y < image.height(); ++y) {
+		const QRgb *src = (const QRgb *)image.constScanLine(y);
+		uint8_t *outLine = (uint8_t *)out + y * rowPitch;
+		for (int x = 0; x < image.width(); ++x) {
+			outLine[x * 4 + 0] = qRed(src[x]);
+			outLine[x * 4 + 1] = qGreen(src[x]);
+			outLine[x * 4 + 2] = qBlue(src[x]);
+			outLine[x * 4 + 3] = qAlpha(src[x]);
+			// We're already scanning each pixel...
+			if (qAlpha(src[x]) != 255) {
+				alphaFull = false;
+			}
+		}
+	}
+
+	if (level == 0 || !alphaFull) {
+		alphaStatus_ = alphaFull ? ReplacedTextureAlpha::FULL : ReplacedTextureAlpha::UNKNOWN;
+	}
 #else
 	png_image png = {};
 	png.version = PNG_IMAGE_VERSION;
@@ -560,8 +608,6 @@ void ReplacedTexture::Load(int level, void *out, int rowPitch) {
 		// This will only check the hashed bits.
 		CheckAlphaResult res = CheckAlphaRGBA8888Basic((u32 *)out, rowPitch / sizeof(u32), png.width, png.height);
 		if (res == CHECKALPHA_ANY || level == 0) {
-			alphaStatus_ = ReplacedTextureAlpha(res);
-		} else if (res == CHECKALPHA_ZERO && alphaStatus_ == ReplacedTextureAlpha::FULL) {
 			alphaStatus_ = ReplacedTextureAlpha(res);
 		}
 	}

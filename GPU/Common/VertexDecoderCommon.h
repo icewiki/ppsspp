@@ -26,6 +26,8 @@
 #include "Core/Reporting.h"
 #include "GPU/ge_constants.h"
 #include "GPU/Common/ShaderCommon.h"
+#include "GPU/GPUCommon.h"
+
 #if PPSSPP_ARCH(ARM)
 #include "Common/ArmEmitter.h"
 #elif PPSSPP_ARCH(ARM64)
@@ -43,6 +45,7 @@
 // Can write code to easily bind these using OpenGL, or read these manually.
 // No morph support, that is taken care of by the VertexDecoder.
 
+// Keep this in 4 bits.
 enum {
 	DEC_NONE,
 	DEC_FLOAT_1,
@@ -59,8 +62,6 @@ enum {
 	DEC_U16_2,
 	DEC_U16_3,
 	DEC_U16_4,
-	DEC_U8A_2,
-	DEC_U16A_2,
 };
 
 int DecFmtSize(u8 fmt);
@@ -73,31 +74,11 @@ struct DecVtxFormat {
 	u8 c1fmt; u8 c1off;
 	u8 nrmfmt; u8 nrmoff;
 	u8 posfmt; u8 posoff;
-	short stride;
-};
+	u8 stride;
 
-struct TransformedVertex
-{
-	union {
-		struct {
-			float x, y, z, fog;     // in case of morph, preblend during decode
-		};
-		float pos[4];
-	};
-	union {
-		struct {
-			float u; float v; float w;   // scaled by uscale, vscale, if there
-		};
-		float uv[3];
-	};
-	union {
-		u8 color0[4];   // prelit
-		u32 color0_32;
-	};
-	union {
-		u8 color1[4];   // prelit
-		u32 color1_32;
-	};
+	uint32_t id;
+	void ComputeID();
+	void InitializeFromID(uint32_t id);
 };
 
 void GetIndexBounds(const void *inds, int count, u32 vertType, u16 *indexLowerBound, u16 *indexUpperBound);
@@ -297,21 +278,6 @@ public:
 			}
 			break;
 
-		case DEC_U8A_2:
-			{
-				const u8 *b = (const u8 *)(data_ + decFmt_.uvoff);
-				uv[0] = (float)b[0];
-				uv[1] = (float)b[1];
-			}
-			break;
-
-		case DEC_U16A_2:
-			{
-				const u16 *p = (const u16 *)(data_ + decFmt_.uvoff);
-				uv[0] = (float)p[0];
-				uv[1] = (float)p[1];
-			}
-			break;
 		default:
 			ERROR_LOG_REPORT_ONCE(fmtuv, G3D, "Reader: Unsupported UV Format %d", decFmt_.uvfmt);
 			memset(uv, 0, sizeof(float) * 2);
@@ -501,6 +467,8 @@ public:
 	void Step_WeightsU16ToFloat() const;
 	void Step_WeightsFloat() const;
 
+	void ComputeSkinMatrix(const float weights[8]) const;
+
 	void Step_WeightsU8Skin() const;
 	void Step_WeightsU16Skin() const;
 	void Step_WeightsFloatSkin() const;
@@ -552,6 +520,10 @@ public:
 	void Step_NormalS16Morph() const;
 	void Step_NormalFloatMorph() const;
 
+	void Step_NormalS8MorphSkin() const;
+	void Step_NormalS16MorphSkin() const;
+	void Step_NormalFloatMorphSkin() const;
+
 	void Step_PosS8() const;
 	void Step_PosS16() const;
 	void Step_PosFloat() const;
@@ -563,6 +535,10 @@ public:
 	void Step_PosS8Morph() const;
 	void Step_PosS16Morph() const;
 	void Step_PosFloatMorph() const;
+
+	void Step_PosS8MorphSkin() const;
+	void Step_PosS16MorphSkin() const;
+	void Step_PosFloatMorphSkin() const;
 
 	void Step_PosS8Through() const;
 	void Step_PosS16Through() const;

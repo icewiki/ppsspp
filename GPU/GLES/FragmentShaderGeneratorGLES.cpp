@@ -36,9 +36,10 @@
 // #define DEBUG_SHADER
 
 // Missing: Z depth range
-bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
+bool GenerateFragmentShader(const FShaderID &id, char *buffer, uint64_t *uniformMask) {
 	char *p = buffer;
 
+	*uniformMask = 0;
 	// In GLSL ES 3.0, you use "in" variables instead of varying.
 
 	bool glslES30 = false;
@@ -56,7 +57,7 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 
 	if (gl_extensions.IsGLES) {
 		// ES doesn't support dual source alpha :(
-		if (gstate_c.featureFlags & GPU_SUPPORTS_GLSL_ES_300) {
+		if (gstate_c.Supports(GPU_SUPPORTS_GLSL_ES_300)) {
 			WRITE(p, "#version 300 es\n");  // GLSL ES 3.0
 			fragColor0 = "fragColor0";
 			texture = "texture";
@@ -89,8 +90,8 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 		highpFog = (gl_extensions.bugs & BUG_PVR_SHADER_PRECISION_BAD) ? true : false;
 		highpTexcoord = highpFog;
 
-		if (gstate_c.featureFlags & GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH) {
-			if ((gstate_c.featureFlags & GPU_SUPPORTS_GLSL_ES_300) != 0 && gl_extensions.EXT_shader_framebuffer_fetch) {
+		if (gstate_c.Supports(GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH)) {
+			if (gstate_c.Supports(GPU_SUPPORTS_GLSL_ES_300) && gl_extensions.EXT_shader_framebuffer_fetch) {
 				WRITE(p, "#extension GL_EXT_shader_framebuffer_fetch : require\n");
 				lastFragData = "fragColor0";
 			} else if (gl_extensions.EXT_shader_framebuffer_fetch) {
@@ -150,12 +151,14 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 	bool enableAlphaTest = id.Bit(FS_BIT_ALPHA_TEST);
 
 	bool alphaTestAgainstZero = id.Bit(FS_BIT_ALPHA_AGAINST_ZERO);
+	bool testForceToZero = id.Bit(FS_BIT_TEST_DISCARD_TO_ZERO);
 	bool enableColorTest = id.Bit(FS_BIT_COLOR_TEST);
 	bool colorTestAgainstZero = id.Bit(FS_BIT_COLOR_AGAINST_ZERO);
 	bool enableColorDoubling = id.Bit(FS_BIT_COLOR_DOUBLE);
 	bool doTextureProjection = id.Bit(FS_BIT_DO_TEXTURE_PROJ);
 	bool doTextureAlpha = id.Bit(FS_BIT_TEXALPHA);
 	bool doFlatShading = id.Bit(FS_BIT_FLATSHADE);
+	bool shaderDepal = id.Bit(FS_BIT_SHADER_DEPAL);
 
 	GEComparison alphaTestFunc = (GEComparison)id.Bits(FS_BIT_ALPHA_TEST_FUNC, 3);
 	GEComparison colorTestFunc = (GEComparison)id.Bits(FS_BIT_COLOR_TEST_FUNC, 2);
@@ -172,6 +175,10 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 
 	bool isModeClear = id.Bit(FS_BIT_CLEARMODE);
 
+	if (shaderDepal && gl_extensions.IsGLES) {
+		WRITE(p, "precision highp int;\n");
+	}
+
 	const char *shading = "";
 	if (glslES30)
 		shading = doFlatShading ? "flat" : "";
@@ -180,6 +187,7 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 		WRITE(p, "uniform sampler2D tex;\n");
 
 	if (!isModeClear && replaceBlend > REPLACE_BLEND_STANDARD) {
+		*uniformMask |= DIRTY_SHADERBLEND;
 		if (!gstate_c.Supports(GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH) && replaceBlend == REPLACE_BLEND_COPY_FBO) {
 			if (!texelFetch) {
 				WRITE(p, "uniform vec2 u_fbotexSize;\n");
@@ -195,6 +203,7 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 	}
 
 	if (needShaderTexClamp && doTexture) {
+		*uniformMask |= DIRTY_TEXCLAMP;
 		WRITE(p, "uniform vec4 u_texclamp;\n");
 		if (id.Bit(FS_BIT_TEXTURE_AT_OFFSET)) {
 			WRITE(p, "uniform vec2 u_texclampoff;\n");
@@ -205,24 +214,36 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 		if (g_Config.bFragmentTestCache) {
 			WRITE(p, "uniform sampler2D testtex;\n");
 		} else {
+			*uniformMask |= DIRTY_ALPHACOLORREF;
 			WRITE(p, "uniform vec4 u_alphacolorref;\n");
 			if (bitwiseOps && ((enableColorTest && !colorTestAgainstZero) || (enableAlphaTest && !alphaTestAgainstZero))) {
+				*uniformMask |= DIRTY_ALPHACOLORMASK;
 				WRITE(p, "uniform ivec4 u_alphacolormask;\n");
 			}
 		}
 	}
 
+	if (shaderDepal) {
+		WRITE(p, "uniform sampler2D pal;\n");
+		WRITE(p, "uniform int u_depal;\n");
+		*uniformMask |= DIRTY_DEPAL;
+	}
+
 	StencilValueType replaceAlphaWithStencilType = (StencilValueType)id.Bits(FS_BIT_REPLACE_ALPHA_WITH_STENCIL_TYPE, 4);
 	if (stencilToAlpha && replaceAlphaWithStencilType == STENCIL_VALUE_UNIFORM) {
+		*uniformMask |= DIRTY_STENCILREPLACEVALUE;
 		WRITE(p, "uniform float u_stencilReplaceValue;\n");
 	}
-	if (doTexture && texFunc == GE_TEXFUNC_BLEND)
+	if (doTexture && texFunc == GE_TEXFUNC_BLEND) {
+		*uniformMask |= DIRTY_TEXENV;
 		WRITE(p, "uniform vec3 u_texenv;\n");
+	}
 
 	WRITE(p, "%s %s vec4 v_color0;\n", shading, varying);
 	if (lmode)
 		WRITE(p, "%s %s vec3 v_color1;\n", shading, varying);
 	if (enableFog) {
+		*uniformMask |= DIRTY_FOGCOLOR;
 		WRITE(p, "uniform vec3 u_fogcolor;\n");
 		WRITE(p, "%s %s float v_fogdepth;\n", varying, highpFog ? "highp" : "mediump");
 	}
@@ -234,7 +255,7 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 		if (enableAlphaTest && !alphaTestAgainstZero) {
 			if (bitwiseOps) {
 				WRITE(p, "int roundAndScaleTo255i(in float x) { return int(floor(x * 255.0 + 0.5)); }\n");
-			} else if (gl_extensions.gpuVendor == GPU_VENDOR_POWERVR) {
+			} else if (gl_extensions.gpuVendor == GPU_VENDOR_IMGTEC) {
 				WRITE(p, "float roundTo255thf(in mediump float x) { mediump float y = x + (0.5/255.0); return y - fract(y * 255.0) * (1.0 / 255.0); }\n");
 			} else {
 				WRITE(p, "float roundAndScaleTo255f(in float x) { return floor(x * 255.0 + 0.5); }\n");
@@ -243,7 +264,7 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 		if (enableColorTest && !colorTestAgainstZero) {
 			if (bitwiseOps) {
 				WRITE(p, "ivec3 roundAndScaleTo255iv(in vec3 x) { return ivec3(floor(x * 255.0 + 0.5)); }\n");
-			} else if (gl_extensions.gpuVendor == GPU_VENDOR_POWERVR) {
+			} else if (gl_extensions.gpuVendor == GPU_VENDOR_IMGTEC) {
 				WRITE(p, "vec3 roundTo255thv(in vec3 x) { vec3 y = x + (0.5/255.0); return y - fract(y * 255.0) * (1.0 / 255.0); }\n");
 			} else {
 				WRITE(p, "vec3 roundAndScaleTo255v(in vec3 x) { return floor(x * 255.0 + 0.5); }\n");
@@ -325,12 +346,105 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 				doTextureProjection = false;
 			}
 
-			if (doTextureProjection) {
-				WRITE(p, "  vec4 t = %sProj(tex, %s);\n", texture, texcoord);
+			if (!shaderDepal) {
+				if (doTextureProjection) {
+					WRITE(p, "  vec4 t = %sProj(tex, %s);\n", texture, texcoord);
+				} else {
+					WRITE(p, "  vec4 t = %s(tex, %s.xy);\n", texture, texcoord);
+				}
 			} else {
-				WRITE(p, "  vec4 t = %s(tex, %s.xy);\n", texture, texcoord);
+				if (doTextureProjection) {
+					// We don't use textureProj because we need better control and it's probably not much of a savings anyway.
+					WRITE(p, "  vec2 uv = %s.xy/%s.z;\n  vec2 uv_round;\n", texcoord, texcoord);
+				} else {
+					WRITE(p, "  vec2 uv = %s.xy;\n  vec2 uv_round;\n", texcoord);
+				}
+				WRITE(p, "  vec2 tsize = vec2(textureSize(tex, 0));\n");
+				WRITE(p, "  vec2 fraction;\n");
+				WRITE(p, "  bool bilinear = (u_depal >> 31) != 0;\n");
+				WRITE(p, "  if (bilinear) {\n");
+				WRITE(p, "    uv_round = uv * tsize - vec2(0.5, 0.5);\n");
+				WRITE(p, "    fraction = fract(uv_round);\n");
+				WRITE(p, "    uv_round = (uv_round - fraction + vec2(0.5, 0.5)) / tsize;\n");  // We want to take our four point samples at pixel centers.
+				WRITE(p, "  } else {\n");
+				WRITE(p, "    uv_round = uv;\n");
+				WRITE(p, "  }\n");
+				WRITE(p, "  vec4 t = %s(tex, uv_round);\n", texture);
+				WRITE(p, "  vec4 t1 = %sOffset(tex, uv_round, ivec2(1, 0));\n", texture);
+				WRITE(p, "  vec4 t2 = %sOffset(tex, uv_round, ivec2(0, 1));\n", texture);
+				WRITE(p, "  vec4 t3 = %sOffset(tex, uv_round, ivec2(1, 1));\n", texture);
+				WRITE(p, "  int depalMask = (u_depal & 0xFF);\n");
+				WRITE(p, "  int depalShift = ((u_depal >> 8) & 0xFF);\n");
+				WRITE(p, "  int depalOffset = (((u_depal >> 16) & 0xFF) << 4);\n");
+				WRITE(p, "  int depalFmt = ((u_depal >> 24) & 0x3);\n");
+				WRITE(p, "  ivec4 col; int index0; int index1; int index2; int index3;\n");
+				WRITE(p, "  switch (depalFmt) {\n");  // We might want to include fmt in the shader ID if this is a performance issue.
+				WRITE(p, "  case 0:\n");  // 565
+				WRITE(p, "    col = ivec4(t.rgb * vec3(31.99, 63.99, 31.99), 0);\n");
+				WRITE(p, "    index0 = (col.b << 11) | (col.g << 5) | (col.r);\n");
+				WRITE(p, "    if (bilinear) {\n");
+				WRITE(p, "      col = ivec4(t1.rgb * vec3(31.99, 63.99, 31.99), 0);\n");
+				WRITE(p, "      index1 = (col.b << 11) | (col.g << 5) | (col.r);\n");
+				WRITE(p, "      col = ivec4(t2.rgb * vec3(31.99, 63.99, 31.99), 0);\n");
+				WRITE(p, "      index2 = (col.b << 11) | (col.g << 5) | (col.r);\n");
+				WRITE(p, "      col = ivec4(t3.rgb * vec3(31.99, 63.99, 31.99), 0);\n");
+				WRITE(p, "      index3 = (col.b << 11) | (col.g << 5) | (col.r);\n");
+				WRITE(p, "    }\n");
+				WRITE(p, "    break;\n");
+				WRITE(p, "  case 1:\n");  // 5551
+				WRITE(p, "    col = ivec4(t.rgba * vec4(31.99, 31.99, 31.99, 1.0));\n");
+				WRITE(p, "    index0 = (col.a << 15) | (col.b << 10) | (col.g << 5) | (col.r);\n");
+				WRITE(p, "    if (bilinear) {\n");
+				WRITE(p, "      col = ivec4(t1.rgba * vec4(31.99, 31.99, 31.99, 1.0));\n");
+				WRITE(p, "      index1 = (col.a << 15) | (col.b << 10) | (col.g << 5) | (col.r);\n");
+				WRITE(p, "      col = ivec4(t2.rgba * vec4(31.99, 31.99, 31.99, 1.0));\n");
+				WRITE(p, "      index2 = (col.a << 15) | (col.b << 10) | (col.g << 5) | (col.r);\n");
+				WRITE(p, "      col = ivec4(t3.rgba * vec4(31.99, 31.99, 31.99, 1.0));\n");
+				WRITE(p, "      index3 = (col.a << 15) | (col.b << 10) | (col.g << 5) | (col.r);\n");
+				WRITE(p, "    }\n");
+				WRITE(p, "    break;\n");
+				WRITE(p, "  case 2:\n");  // 4444
+				WRITE(p, "    col = ivec4(t.rgba * vec4(15.99, 15.99, 15.99, 15.99));\n");
+				WRITE(p, "    index0 = (col.a << 12) | (col.b << 8) | (col.g << 4) | (col.r);\n");
+				WRITE(p, "    if (bilinear) {\n");
+				WRITE(p, "      col = ivec4(t1.rgba * vec4(15.99, 15.99, 15.99, 15.99));\n");
+				WRITE(p, "      index1 = (col.a << 12) | (col.b << 8) | (col.g << 4) | (col.r);\n");
+				WRITE(p, "      col = ivec4(t2.rgba * vec4(15.99, 15.99, 15.99, 15.99));\n");
+				WRITE(p, "      index2 = (col.a << 12) | (col.b << 8) | (col.g << 4) | (col.r);\n");
+				WRITE(p, "      col = ivec4(t3.rgba * vec4(15.99, 15.99, 15.99, 15.99));\n");
+				WRITE(p, "      index3 = (col.a << 12) | (col.b << 8) | (col.g << 4) | (col.r);\n");
+				WRITE(p, "    }\n");
+				WRITE(p, "    break;\n");
+				WRITE(p, "  case 3:\n");  // 8888
+				WRITE(p, "    col = ivec4(t.rgba * vec4(255.99, 255.99, 255.99, 255.99));\n");
+				WRITE(p, "    index0 = (col.a << 24) | (col.b << 16) | (col.g << 8) | (col.r);\n");
+				WRITE(p, "    if (bilinear) {\n");
+				WRITE(p, "      col = ivec4(t1.rgba * vec4(255.99, 255.99, 255.99, 255.99));\n");
+				WRITE(p, "      index1 = (col.a << 24) | (col.b << 16) | (col.g << 8) | (col.r);\n");
+				WRITE(p, "      col = ivec4(t2.rgba * vec4(255.99, 255.99, 255.99, 255.99));\n");
+				WRITE(p, "      index2 = (col.a << 24) | (col.b << 16) | (col.g << 8) | (col.r);\n");
+				WRITE(p, "      col = ivec4(t3.rgba * vec4(255.99, 255.99, 255.99, 255.99));\n");
+				WRITE(p, "      index3 = (col.a << 24) | (col.b << 16) | (col.g << 8) | (col.r);\n");
+				WRITE(p, "    }\n");
+				WRITE(p, "    break;\n");
+				WRITE(p, "  };\n");
+				WRITE(p, "  index0 = ((index0 >> depalShift) & depalMask) | depalOffset;\n");
+				WRITE(p, "  t = texelFetch(pal, ivec2(index0, 0), 0);\n");
+				WRITE(p, "  if (bilinear && !(index0 == index1 && index1 == index2 && index2 == index3)) {\n");
+				WRITE(p, "    index1 = ((index1 >> depalShift) & depalMask) | depalOffset;\n");
+				WRITE(p, "    index2 = ((index2 >> depalShift) & depalMask) | depalOffset;\n");
+				WRITE(p, "    index3 = ((index3 >> depalShift) & depalMask) | depalOffset;\n");
+				WRITE(p, "    t1 = texelFetch(pal, ivec2(index1, 0), 0);\n");
+				WRITE(p, "    t2 = texelFetch(pal, ivec2(index2, 0), 0);\n");
+				WRITE(p, "    t3 = texelFetch(pal, ivec2(index3, 0), 0);\n");
+				WRITE(p, "    t = mix(t, t1, fraction.x);\n");
+				WRITE(p, "    t2 = mix(t2, t3, fraction.x);\n");
+				WRITE(p, "    t = mix(t, t2, fraction.y);\n");
+				WRITE(p, "  }\n");
 			}
-			WRITE(p, "  vec4 p = v_color0;\n");
+
+			if (texFunc != GE_TEXFUNC_REPLACE || !doTextureAlpha)
+				WRITE(p, "  vec4 p = v_color0;\n");
 
 			if (doTextureAlpha) { // texfmt == RGBA
 				switch (texFunc) {
@@ -405,39 +519,40 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 			}
 		}
 
+		const char *discardStatement = testForceToZero ? "v.a = 0.0;" : "discard;";
 		if (enableAlphaTest) {
 			if (alphaTestAgainstZero) {
 				// When testing against 0 (extremely common), we can avoid some math.
 				// 0.002 is approximately half of 1.0 / 255.0.
 				if (alphaTestFunc == GE_COMP_NOTEQUAL || alphaTestFunc == GE_COMP_GREATER) {
-					WRITE(p, "  if (v.a < 0.002) discard;\n");
+					WRITE(p, "  if (v.a < 0.002) %s\n", discardStatement);
 				} else if (alphaTestFunc != GE_COMP_NEVER) {
 					// Anything else is a test for == 0.  Happens sometimes, actually...
-					WRITE(p, "  if (v.a > 0.002) discard;\n");
+					WRITE(p, "  if (v.a > 0.002) %s\n", discardStatement);
 				} else {
 					// NEVER has been logged as used by games, although it makes little sense - statically failing.
 					// Maybe we could discard the drawcall, but it's pretty rare.  Let's just statically discard here.
-					WRITE(p, "  discard;\n");
+					WRITE(p, "  %s\n", discardStatement);
 				}
 			} else if (g_Config.bFragmentTestCache) {
 				WRITE(p, "  float aResult = %s(testtex, vec2(%s, 0)).a;\n", texture, alphaTestXCoord.c_str());
-				WRITE(p, "  if (aResult < 0.5) discard;\n");
+				WRITE(p, "  if (aResult < 0.5) %s\n", discardStatement);
 			} else {
 				const char *alphaTestFuncs[] = { "#", "#", " != ", " == ", " >= ", " > ", " <= ", " < " };
 				if (alphaTestFuncs[alphaTestFunc][0] != '#') {
 					if (bitwiseOps) {
-						WRITE(p, "  if ((roundAndScaleTo255i(v.a) & u_alphacolormask.a) %s int(u_alphacolorref.a)) discard;\n", alphaTestFuncs[alphaTestFunc]);
-					} else if (gl_extensions.gpuVendor == GPU_VENDOR_POWERVR) {
+						WRITE(p, "  if ((roundAndScaleTo255i(v.a) & u_alphacolormask.a) %s int(u_alphacolorref.a)) %s\n", alphaTestFuncs[alphaTestFunc], discardStatement);
+					} else if (gl_extensions.gpuVendor == GPU_VENDOR_IMGTEC) {
 						// Work around bad PVR driver problem where equality check + discard just doesn't work.
 						if (alphaTestFunc != GE_COMP_NOTEQUAL) {
-							WRITE(p, "  if (roundTo255thf(v.a) %s u_alphacolorref.a) discard;\n", alphaTestFuncs[alphaTestFunc]);
+							WRITE(p, "  if (roundTo255thf(v.a) %s u_alphacolorref.a) %s\n", alphaTestFuncs[alphaTestFunc], discardStatement);
 						}
 					} else {
-						WRITE(p, "  if (roundAndScaleTo255f(v.a) %s u_alphacolorref.a) discard;\n", alphaTestFuncs[alphaTestFunc]);
+						WRITE(p, "  if (roundAndScaleTo255f(v.a) %s u_alphacolorref.a) %s\n", alphaTestFuncs[alphaTestFunc], discardStatement);
 					}
 				} else {
 					// This means NEVER.  See above.
-					WRITE(p, "  discard;\n");
+					WRITE(p, "  %s\n", discardStatement);
 				}
 			}
 		}
@@ -447,14 +562,14 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 				// When testing against 0 (common), we can avoid some math.
 				// 0.002 is approximately half of 1.0 / 255.0.
 				if (colorTestFunc == GE_COMP_NOTEQUAL) {
-					WRITE(p, "  if (v.r < 0.002 && v.g < 0.002 && v.b < 0.002) discard;\n");
+					WRITE(p, "  if (v.r < 0.002 && v.g < 0.002 && v.b < 0.002) %s\n", discardStatement);
 				} else if (colorTestFunc != GE_COMP_NEVER) {
 					// Anything else is a test for == 0.
-					WRITE(p, "  if (v.r > 0.002 || v.g > 0.002 || v.b > 0.002) discard;\n");
+					WRITE(p, "  if (v.r > 0.002 || v.g > 0.002 || v.b > 0.002) %s\n", discardStatement);
 				} else {
 					// NEVER has been logged as used by games, although it makes little sense - statically failing.
 					// Maybe we could discard the drawcall, but it's pretty rare.  Let's just statically discard here.
-					WRITE(p, "  discard;\n");
+					WRITE(p, "  %s\n", discardStatement);
 				}
 			} else if (g_Config.bFragmentTestCache) {
 				WRITE(p, "  float rResult = %s(testtex, vec2(vScale256.r, 0)).r;\n", texture);
@@ -462,10 +577,10 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 				WRITE(p, "  float bResult = %s(testtex, vec2(vScale256.b, 0)).b;\n", texture);
 				if (colorTestFunc == GE_COMP_EQUAL) {
 					// Equal means all parts must be equal.
-					WRITE(p, "  if (rResult < 0.5 || gResult < 0.5 || bResult < 0.5) discard;\n");
+					WRITE(p, "  if (rResult < 0.5 || gResult < 0.5 || bResult < 0.5) %s\n", discardStatement);
 				} else {
 					// Not equal means any part must be not equal.
-					WRITE(p, "  if (rResult < 0.5 && gResult < 0.5 && bResult < 0.5) discard;\n");
+					WRITE(p, "  if (rResult < 0.5 && gResult < 0.5 && bResult < 0.5) %s\n", discardStatement);
 				}
 			} else {
 				const char *colorTestFuncs[] = { "#", "#", " != ", " == " };
@@ -475,14 +590,14 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 						WRITE(p, "  ivec3 v_scaled = roundAndScaleTo255iv(v.rgb);\n");
 						const char *maskedFragColor = "ivec3(v_scaled.r & u_alphacolormask.r, v_scaled.g & u_alphacolormask.g, v_scaled.b & u_alphacolormask.b)";
 						const char *maskedColorRef = "ivec3(int(u_alphacolorref.r) & u_alphacolormask.r, int(u_alphacolorref.g) & u_alphacolormask.g, int(u_alphacolorref.b) & u_alphacolormask.b)";
-						WRITE(p, "  if (%s %s %s) discard;\n", maskedFragColor, colorTestFuncs[colorTestFunc], maskedColorRef);
-					} else if (gl_extensions.gpuVendor == GPU_VENDOR_POWERVR) {
-						WRITE(p, "  if (roundTo255thv(v.rgb) %s u_alphacolorref.rgb) discard;\n", colorTestFuncs[colorTestFunc]);
+						WRITE(p, "  if (%s %s %s) %s\n", maskedFragColor, colorTestFuncs[colorTestFunc], maskedColorRef, discardStatement);
+					} else if (gl_extensions.gpuVendor == GPU_VENDOR_IMGTEC) {
+						WRITE(p, "  if (roundTo255thv(v.rgb) %s u_alphacolorref.rgb) %s\n", colorTestFuncs[colorTestFunc], discardStatement);
 					} else {
-						WRITE(p, "  if (roundAndScaleTo255v(v.rgb) %s u_alphacolorref.rgb) discard;\n", colorTestFuncs[colorTestFunc]);
+						WRITE(p, "  if (roundAndScaleTo255v(v.rgb) %s u_alphacolorref.rgb) %s\n", colorTestFuncs[colorTestFunc], discardStatement);
 					}
 				} else {
-					WRITE(p, "  discard;\n");
+					WRITE(p, "  %s\n", discardStatement);
 				}
 			}
 		}
@@ -525,7 +640,7 @@ bool GenerateFragmentShader(const ShaderID &id, char *buffer) {
 		if (replaceBlend == REPLACE_BLEND_COPY_FBO) {
 			// If we have NV_shader_framebuffer_fetch / EXT_shader_framebuffer_fetch, we skip the blit.
 			// We can just read the prev value more directly.
-			if (gstate_c.featureFlags & GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH) {
+			if (gstate_c.Supports(GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH)) {
 				WRITE(p, "  lowp vec4 destColor = %s;\n", lastFragData);
 			} else if (!texelFetch) {
 				WRITE(p, "  lowp vec4 destColor = %s(fbotex, gl_FragCoord.xy * u_fbotexSize.xy);\n", texture);

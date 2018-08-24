@@ -142,20 +142,8 @@ void Jit::DoState(PointerWrap &p) {
 	CBreakPoints::SetSkipFirst(0);
 }
 
-// This is here so the savestate matches between jit and non-jit.
-void Jit::DoDummyState(PointerWrap &p) {
-	auto s = p.Section("Jit", 1, 2);
-	if (!s)
-		return;
-
-	bool dummy = false;
-	p.Do(dummy);
-	if (s >= 2) {
-		dummy = true;
-		p.Do(dummy);
-	}
+void Jit::UpdateFCR31() {
 }
-
 
 void Jit::GetStateAndFlushAll(RegCacheState &state) {
 	gpr.GetState(state.gpr);
@@ -210,8 +198,12 @@ void Jit::ApplyRoundingMode(bool force) {
 	}
 }
 
-void Jit::UpdateRoundingMode() {
-	CALL(updateRoundingMode);
+void Jit::UpdateRoundingMode(u32 fcr31) {
+	// We must set js.hasSetRounding at compile time, or this block will use the wrong rounding mode.
+	// The fcr31 parameter is -1 when not known at compile time, so we just assume it was changed.
+	if (fcr31 & 0x01000003) {
+		js.hasSetRounding = true;
+	}
 }
 
 void Jit::ClearCache()
@@ -301,7 +293,7 @@ void Jit::Compile(u32 em_address) {
 
 	// Drat.  The VFPU hit an uneaten prefix at the end of a block.
 	if (js.startDefaultPrefix && js.MayHavePrefix()) {
-		WARN_LOG(JIT, "An uneaten prefix at end of block: %08x", GetCompilerPC() - 4);
+		WARN_LOG_REPORT(JIT, "An uneaten prefix at end of block: %08x", GetCompilerPC() - 4);
 		js.LogPrefix();
 
 		// Let's try that one more time.  We won't get back here because we toggled the value.
@@ -430,8 +422,6 @@ void Jit::AddContinuedBlock(u32 dest) {
 bool Jit::DescribeCodePtr(const u8 *ptr, std::string &name) {
 	if (ptr == applyRoundingMode)
 		name = "applyRoundingMode";
-	else if (ptr == updateRoundingMode)
-		name = "updateRoundingMode";
 	else if (ptr == dispatcher)
 		name = "dispatcher";
 	else if (ptr == dispatcherInEAXNoCheck)
@@ -711,7 +701,7 @@ void Jit::WriteExitDestInReg(X64Reg reg) {
 	// If we need to verify coreState and rewind, we may not jump yet.
 	if (js.afterOp & (JitState::AFTER_CORE_STATE | JitState::AFTER_REWIND_PC_BAD_STATE)) {
 		// CORE_RUNNING is <= CORE_NEXTFRAME.
-		if (RipAccessible((const void *)coreState)) {
+		if (RipAccessible((const void *)&coreState)) {
 			CMP(32, M(&coreState), Imm32(CORE_NEXTFRAME));  // rip accessible
 		} else {
 			X64Reg temp = reg == RAX ? RDX : RAX;

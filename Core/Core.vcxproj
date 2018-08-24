@@ -78,7 +78,6 @@
       <MinimalRebuild>false</MinimalRebuild>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <ForcedIncludeFiles>Common/DbgNew.h</ForcedIncludeFiles>
     </ClCompile>
     <Link>
@@ -101,7 +100,6 @@
       <MinimalRebuild>false</MinimalRebuild>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <ForcedIncludeFiles>Common/DbgNew.h</ForcedIncludeFiles>
     </ClCompile>
     <Link>
@@ -184,8 +182,21 @@
     <ClCompile Include="..\ext\udis86\syn.c" />
     <ClCompile Include="..\ext\udis86\udis86.c" />
     <ClCompile Include="AVIDump.cpp" />
+    <ClCompile Include="Debugger\WebSocket.cpp" />
+    <ClCompile Include="Debugger\WebSocket\BreakpointSubscriber.cpp" />
+    <ClCompile Include="Debugger\WebSocket\CPUCoreSubscriber.cpp" />
+    <ClCompile Include="Debugger\WebSocket\GameBroadcaster.cpp" />
+    <ClCompile Include="Debugger\WebSocket\GameSubscriber.cpp" />
+    <ClCompile Include="Debugger\WebSocket\GPUBufferSubscriber.cpp" />
+    <ClCompile Include="Debugger\WebSocket\HLESubscriber.cpp" />
+    <ClCompile Include="Debugger\WebSocket\LogBroadcaster.cpp" />
+    <ClCompile Include="Debugger\WebSocket\DisasmSubscriber.cpp" />
+    <ClCompile Include="Debugger\WebSocket\SteppingBroadcaster.cpp" />
+    <ClCompile Include="Debugger\WebSocket\SteppingSubscriber.cpp" />
+    <ClCompile Include="Debugger\WebSocket\WebSocketUtils.cpp" />
     <ClCompile Include="FileSystems\BlobFileSystem.cpp" />
     <ClCompile Include="HLE\KUBridge.cpp" />
+    <ClCompile Include="HLE\sceUsbAcc.cpp" />
     <ClCompile Include="HLE\sceUsbCam.cpp" />
     <ClCompile Include="MIPS\IR\IRAsm.cpp" />
     <ClCompile Include="MIPS\IR\IRCompALU.cpp" />
@@ -199,6 +210,7 @@
     <ClCompile Include="MIPS\IR\IRJit.cpp" />
     <ClCompile Include="MIPS\IR\IRPassSimplify.cpp" />
     <ClCompile Include="MIPS\IR\IRRegCache.cpp" />
+    <ClCompile Include="Replay.cpp" />
     <ClCompile Include="TextureReplacer.cpp" />
     <ClCompile Include="Compatibility.cpp" />
     <ClCompile Include="Config.cpp" />
@@ -236,7 +248,10 @@
     <ClCompile Include="FileSystems\VirtualDiscFileSystem.cpp" />
     <ClCompile Include="Font\PGF.cpp" />
     <ClCompile Include="HDRemaster.cpp" />
-    <ClCompile Include="HLE\HLE.cpp" />
+    <ClCompile Include="HLE\HLE.cpp">
+      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">MaxSpeed</Optimization>
+      <BasicRuntimeChecks Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Default</BasicRuntimeChecks>
+    </ClCompile>
     <ClCompile Include="HLE\HLEHelperThread.cpp" />
     <ClCompile Include="HLE\HLETables.cpp" />
     <ClCompile Include="HLE\proAdhoc.cpp" />
@@ -507,6 +522,7 @@
       <InlineFunctionExpansion Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AnySuitable</InlineFunctionExpansion>
     </ClCompile>
     <ClCompile Include="WaveFile.cpp" />
+    <ClCompile Include="WebServer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\ext\disarm.h" />
@@ -527,8 +543,23 @@
     <ClInclude Include="..\ext\udis86\udint.h" />
     <ClInclude Include="..\ext\udis86\udis86.h" />
     <ClInclude Include="AVIDump.h" />
+    <ClInclude Include="ConfigValues.h" />
+    <ClInclude Include="Debugger\WebSocket.h" />
+    <ClInclude Include="Debugger\WebSocket\BreakpointSubscriber.h" />
+    <ClInclude Include="Debugger\WebSocket\GameSubscriber.h" />
+    <ClInclude Include="Debugger\WebSocket\DisasmSubscriber.h" />
+    <ClInclude Include="Debugger\WebSocket\GPUBufferSubscriber.h" />
+    <ClInclude Include="Debugger\WebSocket\HLESubscriber.h" />
+    <ClInclude Include="Debugger\WebSocket\SteppingSubscriber.h" />
+    <ClInclude Include="Debugger\WebSocket\WebSocketUtils.h" />
+    <ClInclude Include="Debugger\WebSocket\CPUCoreSubscriber.h" />
+    <ClInclude Include="Debugger\WebSocket\GameBroadcaster.h" />
+    <ClInclude Include="Debugger\WebSocket\LogBroadcaster.h" />
+    <ClInclude Include="Debugger\WebSocket\SteppingBroadcaster.h" />
     <ClInclude Include="FileSystems\BlobFileSystem.h" />
+    <ClInclude Include="HLE\KernelThreadDebugInterface.h" />
     <ClInclude Include="HLE\KUBridge.h" />
+    <ClInclude Include="HLE\sceUsbAcc.h" />
     <ClInclude Include="HLE\sceUsbCam.h" />
     <ClInclude Include="MIPS\IR\IRFrontend.h" />
     <ClInclude Include="MIPS\IR\IRInst.h" />
@@ -536,6 +567,7 @@
     <ClInclude Include="MIPS\IR\IRJit.h" />
     <ClInclude Include="MIPS\IR\IRPassSimplify.h" />
     <ClInclude Include="MIPS\IR\IRRegCache.h" />
+    <ClInclude Include="Replay.h" />
     <ClInclude Include="TextureReplacer.h" />
     <ClInclude Include="Compatibility.h" />
     <ClInclude Include="Config.h" />
@@ -741,6 +773,7 @@
     <ClInclude Include="Util\ppge_atlas.h" />
     <ClInclude Include="..\ext\xxhash.h" />
     <ClInclude Include="WaveFile.h" />
+    <ClInclude Include="WebServer.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\android\jni\Android.mk" />

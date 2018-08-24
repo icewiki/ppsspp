@@ -1,5 +1,5 @@
 plugins {
-	id 'com.gladed.androidgitversion' version '0.3.4'
+	id 'com.gladed.androidgitversion' version '0.4.4'
 }
 apply plugin: 'com.android.application'
 
@@ -7,6 +7,7 @@ androidGitVersion {
 	codeFormat = "MNPPBBBB"
 	format = "%tag%%-count%%-branch%%-dirty%"
 	prefix = "v"  // Only tags beginning with v are considered.
+	untrackedIsDirty = false
 }
 
 android {
@@ -30,13 +31,11 @@ android {
 			}
 		} else {
 			release {
-				// Can't build release builds without a key store.
-				println 'This build type should only be invoked from CI. Use Optimized builds instead.'
 			}
 		}
 	}
-	compileSdkVersion 25
-	buildToolsVersion '25.0.0'
+	compileSdkVersion 28
+	buildToolsVersion '28.0.0'
 	defaultConfig {
 		applicationId 'org.ppsspp.ppsspp'
 		if (androidGitVersion.name() != "unknown" && androidGitVersion.code() >= 14000000) {
@@ -52,7 +51,7 @@ android {
 		new File("versioncode.txt").write(androidGitVersion.code().toString())
 
 		minSdkVersion 9
-		targetSdkVersion 25
+		targetSdkVersion 28
 		if (project.hasProperty("ANDROID_VERSION_CODE") && project.hasProperty("ANDROID_VERSION_NAME")) {
 			versionCode ANDROID_VERSION_CODE
 			versionName ANDROID_VERSION_NAME
@@ -110,7 +109,7 @@ android {
 							'-DANDROID_PLATFORM=android-15',
 							'-DANDROID_TOOLCHAIN=clang',
 							'-DANDROID_CPP_FEATURES=',
-							'-DANDROID_STL=gnustl_static',
+							'-DANDROID_STL=c++_static',
 							'-DANDROID_ARM_NEON=TRUE'
 				}
 			}
@@ -125,7 +124,7 @@ android {
 							'-DANDROID_PLATFORM=android-15',
 							'-DANDROID_TOOLCHAIN=clang',
 							'-DANDROID_CPP_FEATURES=',
-							'-DANDROID_STL=gnustl_static',
+							'-DANDROID_STL=c++_static',
 							'-DANDROID_ARM_NEON=TRUE',
 							'-DGOLD=TRUE'
 				}
@@ -137,5 +136,5 @@ afterEvaluate {
 	android.sourceSets.main.assets.getSrcDirs().each { println it }
 }
 dependencies {
-	compile project(':com.bda.controller')
+	implementation project(':com.bda.controller')
 }

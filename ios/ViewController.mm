@@ -6,8 +6,9 @@
 //
 
 #import "ViewController.h"
-#import "AudioEngine.h"
+#import "SubtleVolume.h"
 #import <GLKit/GLKit.h>
+#include <cassert>
 
 #include "base/display.h"
 #include "base/timeutil.h"
@@ -16,10 +17,14 @@
 #include "net/resolve.h"
 #include "ui/screen.h"
 #include "thin3d/thin3d.h"
+#include "thin3d/thin3d_create.h"
+#include "thin3d/GLRenderManager.h"
 #include "input/keycodes.h"
 #include "gfx_es2/gpu_features.h"
 
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
+#include "Core/System.h"
 #include "Common/GraphicsContext.h"
 
 #include <sys/types.h>
@@ -29,51 +34,61 @@
 #define IS_IPAD() ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad)
 #define IS_IPHONE() ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPhone)
 
-#ifndef kCFCoreFoundationVersionNumber_IOS_9_0
-#define kCFCoreFoundationVersionNumber_IOS_9_0 1240.10
-#endif
-
-class IOSDummyGraphicsContext : public DummyGraphicsContext {
+class IOSGraphicsContext : public DummyGraphicsContext {
 public:
-	IOSDummyGraphicsContext() {
+	IOSGraphicsContext() {
 		CheckGLExtensions();
 		draw_ = Draw::T3DCreateGLContext();
+		renderManager_ = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
+		SetGPUBackend(GPUBackend::OPENGL);
+		bool success = draw_->CreatePresets();
+		assert(success);
 	}
-	~IOSDummyGraphicsContext() {
+	~IOSGraphicsContext() {
 		delete draw_;
 	}
 	Draw::DrawContext *GetDrawContext() override {
 		return draw_;
 	}
+	void ThreadStart() override {
+		renderManager_->ThreadStart();
+	}
+
+	bool ThreadFrame() override {
+		return renderManager_->ThreadFrame();
+	}
+
+	void ThreadEnd() override {
+		renderManager_->ThreadEnd();
+	}
+
+	void StopThread() override {
+		renderManager_->WaitUntilQueueIdle();
+		renderManager_->StopThread();
+	}
 private:
 	Draw::DrawContext *draw_;
+	GLRenderManager *renderManager_;
 };
 
-float dp_xscale = 1.0f;
-float dp_yscale = 1.0f;
+static float dp_xscale = 1.0f;
+static float dp_yscale = 1.0f;
 
-double lastSelectPress = 0.0f;
-double lastStartPress = 0.0f;
-bool simulateAnalog = false;
+static double lastSelectPress = 0.0f;
+static double lastStartPress = 0.0f;
+static bool simulateAnalog = false;
+static bool threadEnabled = true;
+static bool threadStopped = false;
 
-extern ScreenManager *screenManager;
-
-extern bool iosCanUseJit;
-extern bool targetIsJailbroken;
-
-ViewController* sharedViewController;
+__unsafe_unretained ViewController* sharedViewController;
 static GraphicsContext *graphicsContext;
 
-@interface ViewController ()
-{
+@interface ViewController () {
 	std::map<uint16_t, uint16_t> iCadeToKeyMap;
 }
 
-@property (nonatomic) EAGLContext* context;
-@property (nonatomic) NSString* documentsPath;
-@property (nonatomic) NSString* bundlePath;
-@property (nonatomic) NSMutableArray* touches;
-@property (nonatomic) AudioEngine* audioEngine;
+@property (nonatomic, strong) EAGLContext* context;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *>* touches;
 //@property (nonatomic) iCadeReaderView* iCadeView;
 #if __IPHONE_OS_VERSION_MAX_ALLOWED > __IPHONE_6_1
 @property (nonatomic) GCController *gameController __attribute__((weak_import));
@@ -81,40 +96,19 @@ static GraphicsContext *graphicsContext;
 
 @end
 
-@implementation ViewController
--(bool) isArm64 {
-	size_t size;
-	cpu_type_t type;
-	size = sizeof(type);
-	sysctlbyname("hw.cputype", &type, &size, NULL, 0);
-	return type == CPU_TYPE_ARM64;
+@interface ViewController () <SubtleVolumeDelegate> {
+	SubtleVolume *volume;
 }
+@end
+
+
+@implementation ViewController
 
 -(id) init {
 	self = [super init];
 	if (self) {
 		sharedViewController = self;
 		self.touches = [NSMutableArray array];
-		self.documentsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) objectAtIndex:0];
-		self.bundlePath = [[[NSBundle mainBundle] resourcePath] stringByAppendingString:@"/assets/"];
-
-		iosCanUseJit = true;
-		targetIsJailbroken = false;
-		NSArray *jailPath = [NSArray arrayWithObjects:
-							@"/Applications/Cydia.app",
-							@"/private/var/lib/apt",
-							@"/private/var/stash",
-							@"/usr/sbin/sshd",
-							@"/usr/bin/sshd", nil];
-
-		for (NSString *string in jailPath) {
-			if ([[NSFileManager defaultManager] fileExistsAtPath:string]) {
-				// checking device jailbreak status in order to determine which message to show in GameSettingsScreen
-				targetIsJailbroken = true;
-			}
-		}
-		
-		NativeInit(0, NULL, [self.documentsPath UTF8String], [self.bundlePath UTF8String], NULL);
 
 		iCadeToKeyMap[iCadeJoystickUp]		= NKCODE_DPAD_UP;
 		iCadeToKeyMap[iCadeJoystickRight]	= NKCODE_DPAD_RIGHT;
@@ -129,6 +123,8 @@ static GraphicsContext *graphicsContext;
 		iCadeToKeyMap[iCadeButtonG]			= NKCODE_BUTTON_1; // Triangle
 		iCadeToKeyMap[iCadeButtonH]			= NKCODE_BUTTON_3; // Circle
 
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appWillTerminate:) name:UIApplicationWillTerminateNotification object:nil];
+
 #if __IPHONE_OS_VERSION_MAX_ALLOWED > __IPHONE_6_1
 		if ([GCController class]) // Checking the availability of a GameController framework
 		{
@@ -138,6 +134,11 @@ static GraphicsContext *graphicsContext;
 #endif
 	}
 	return self;
+}
+
+- (void)subtleVolume:(SubtleVolume *)volumeView willChange:(CGFloat)value {
+}
+- (void)subtleVolume:(SubtleVolume *)volumeView didChange:(CGFloat)value {
 }
 
 - (void)viewDidLoad {
@@ -188,9 +189,9 @@ static GraphicsContext *graphicsContext;
 	pixel_in_dps_x = (float)pixel_xres / (float)dp_xres;
 	pixel_in_dps_y = (float)pixel_yres / (float)dp_yres;
 
-	graphicsContext = new IOSDummyGraphicsContext();
-
-	NativeInitGraphics(graphicsContext);
+	graphicsContext = new IOSGraphicsContext();
+	
+	graphicsContext->ThreadStart();
 
 	dp_xscale = (float)dp_xres / (float)pixel_xres;
 	dp_yscale = (float)dp_yres / (float)pixel_yres;
@@ -207,16 +208,45 @@ static GraphicsContext *graphicsContext;
 		}
 	}
 #endif
-}
+	
+	CGFloat margin = 0;
+	CGFloat height = 16;
+	volume = [[SubtleVolume alloc]
+			  initWithStyle:SubtleVolumeStylePlain
+			  frame:CGRectMake(
+							   margin,   // X
+							   0,        // Y
+							   self.view.frame.size.width-(margin*2), // width
+							   height    // height
+							)];
+	
+	volume.padding = 7;
+	volume.barTintColor = [UIColor blackColor];
+	volume.barBackgroundColor = [UIColor whiteColor];
+	volume.animation = SubtleVolumeAnimationSlideDown;
+	volume.delegate = self;
+	[self.view addSubview:volume];
+	[self.view bringSubviewToFront:volume];
+	
+	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+		NativeInitGraphics(graphicsContext);
 
-- (void)viewDidUnload
-{
-	[super viewDidUnload];
+		ILOG("Emulation thread starting\n");
+		while (threadEnabled) {
+			NativeUpdate();
+			NativeRender(graphicsContext);
+			time_update();
+		}
 
-	if ([EAGLContext currentContext] == self.context) {
-		[EAGLContext setCurrentContext:nil];
-	}
-	self.context = nil;
+		threadStopped = true;
+
+		ILOG("Emulation thread shutting down\n");
+		NativeShutdownGraphics();
+
+		// Also ask the main thread to stop, so it doesn't hang waiting for a new frame.
+		ILOG("Emulation thread stopping\n");
+		graphicsContext->StopThread();
+	});
 }
 
 - (void)didReceiveMemoryWarning
@@ -224,22 +254,62 @@ static GraphicsContext *graphicsContext;
 	[super didReceiveMemoryWarning];
 }
 
-- (void)dealloc
+- (void)appWillTerminate:(NSNotification *)notification
 {
-	[self viewDidUnload];
+	[self shutdown];
+}
+
+- (void)shutdown
+{
+	if (sharedViewController == nil) {
+		return;
+	}
+	
+	if(volume) {
+		[volume removeFromSuperview];
+		volume = nil;
+	}
+
+	Audio_Shutdown();
+
+	if (threadEnabled) {
+		threadEnabled = false;
+		while (graphicsContext->ThreadFrame()) {
+			continue;
+		}
+		while (!threadStopped) {}
+		graphicsContext->ThreadEnd();
+	}
+
+	sharedViewController = nil;
+
+	if (self.context) {
+		if ([EAGLContext currentContext] == self.context) {
+			[EAGLContext setCurrentContext:nil];
+		}
+		self.context = nil;
+	}
+
+	[[NSNotificationCenter defaultCenter] removeObserver:self];
 
 #if __IPHONE_OS_VERSION_MAX_ALLOWED > __IPHONE_6_1
 	if ([GCController class]) {
-		[[NSNotificationCenter defaultCenter] removeObserver:self name:GCControllerDidConnectNotification object:nil];
-		[[NSNotificationCenter defaultCenter] removeObserver:self name:GCControllerDidDisconnectNotification object:nil];
 		self.gameController = nil;
 	}
 #endif
-	NativeShutdownGraphics();
-	graphicsContext->Shutdown();
-	delete graphicsContext;
-	graphicsContext = NULL;
+
+	if (graphicsContext) {
+		graphicsContext->Shutdown();
+		delete graphicsContext;
+		graphicsContext = NULL;
+	}
+
 	NativeShutdown();
+}
+
+- (void)dealloc
+{
+	[self shutdown];
 }
 
 // For iOS before 6.0
@@ -256,9 +326,8 @@ static GraphicsContext *graphicsContext;
 
 - (void)glkView:(GLKView *)view drawInRect:(CGRect)rect
 {
-	NativeUpdate();
-	NativeRender(graphicsContext);
-	time_update();
+	if (sharedViewController)
+		graphicsContext->ThreadFrame();
 }
 
 - (void)touchX:(float)x y:(float)y code:(int)code pointerId:(int)pointerId
@@ -349,13 +418,13 @@ static GraphicsContext *graphicsContext;
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
-    for(UITouch* touch in touches)
-    {
-        CGPoint point = [touch locationInView:self.view];
-        NSDictionary* dict = [self touchDictBy:touch];
-        [self touchX:point.x y:point.y code:2 pointerId:[[dict objectForKey:@"index"] intValue]];
-        [self.touches removeObject:dict];
-    }
+	for(UITouch* touch in touches)
+	{
+		CGPoint point = [touch locationInView:self.view];
+		NSDictionary* dict = [self touchDictBy:touch];
+		[self touchX:point.x y:point.y code:2 pointerId:[[dict objectForKey:@"index"] intValue]];
+		[self.touches removeObject:dict];
+	}
 }
 
 - (void)bindDefaultFBO

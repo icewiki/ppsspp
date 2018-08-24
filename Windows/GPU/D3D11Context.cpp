@@ -2,17 +2,33 @@
 
 #include "Common/CommonWindows.h"
 #include <d3d11.h>
+#include <WinError.h>
+#include <cassert>
 
 #include "base/logging.h"
 #include "util/text/utf8.h"
 #include "i18n/i18n.h"
 
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/Reporting.h"
+#include "Core/System.h"
 #include "Windows/GPU/D3D11Context.h"
 #include "Windows/W32Util/Misc.h"
 #include "thin3d/thin3d.h"
+#include "thin3d/thin3d_create.h"
 #include "thin3d/d3d11_loader.h"
+
+#ifdef __MINGW32__
+#undef __uuidof
+#define __uuidof(type) IID_##type
+#endif
+
+#ifndef DXGI_ERROR_NOT_FOUND
+#define _FACDXGI    0x87a
+#define MAKE_DXGI_HRESULT(code) MAKE_HRESULT(1, _FACDXGI, code)
+#define DXGI_ERROR_NOT_FOUND MAKE_DXGI_HRESULT(2)
+#endif
 
 #if PPSSPP_PLATFORM(UWP)
 #error This file should not be compiled for UWP.
@@ -33,7 +49,7 @@ void D3D11Context::SwapInterval(int interval) {
 	// Dummy
 }
 
-HRESULT D3D11Context::CreateTheDevice() {
+HRESULT D3D11Context::CreateTheDevice(IDXGIAdapter *adapter) {
 	bool windowed = true;
 #ifdef _DEBUG
 	UINT createDeviceFlags = D3D11_CREATE_DEVICE_DEBUG;
@@ -62,19 +78,13 @@ HRESULT D3D11Context::CreateTheDevice() {
 	const UINT numFeatureLevels = ARRAYSIZE(featureLevels);
 
 	HRESULT hr = S_OK;
-	// Temporarily commenting out until we can dynamically load D3D11CreateDevice.
-	for (UINT driverTypeIndex = 0; driverTypeIndex < numDriverTypes; driverTypeIndex++) {
-		driverType_ = driverTypes[driverTypeIndex];
-		hr = ptr_D3D11CreateDevice(nullptr, driverType_, nullptr, createDeviceFlags, (D3D_FEATURE_LEVEL *)featureLevels, numFeatureLevels,
+	D3D_DRIVER_TYPE driverType = D3D_DRIVER_TYPE_UNKNOWN;
+	hr = ptr_D3D11CreateDevice(adapter, driverType, nullptr, createDeviceFlags, (D3D_FEATURE_LEVEL *)featureLevels, numFeatureLevels,
+		D3D11_SDK_VERSION, &device_, &featureLevel_, &context_);
+	if (hr == E_INVALIDARG) {
+		// DirectX 11.0 platforms will not recognize D3D_FEATURE_LEVEL_11_1 so we need to retry without it
+		hr = ptr_D3D11CreateDevice(adapter, driverType, nullptr, createDeviceFlags, (D3D_FEATURE_LEVEL *)&featureLevels[3], numFeatureLevels - 3,
 			D3D11_SDK_VERSION, &device_, &featureLevel_, &context_);
-
-		if (hr == E_INVALIDARG) {
-			// DirectX 11.0 platforms will not recognize D3D_FEATURE_LEVEL_11_1 so we need to retry without it
-			hr = ptr_D3D11CreateDevice(nullptr, driverType_, nullptr, createDeviceFlags, (D3D_FEATURE_LEVEL *)&featureLevels[3], numFeatureLevels - 3,
-				D3D11_SDK_VERSION, &device_, &featureLevel_, &context_);
-		}
-		if (SUCCEEDED(hr))
-			break;
 	}
 	return hr;
 }
@@ -91,8 +101,30 @@ bool D3D11Context::Init(HINSTANCE hInst, HWND wnd, std::string *error_message) {
 	LoadD3D11Error result = LoadD3D11();
 
 	HRESULT hr = E_FAIL;
+	std::vector<std::string> adapterNames;
 	if (result == LoadD3D11Error::SUCCESS) {
-		hr = CreateTheDevice();
+		std::vector<IDXGIAdapter *> adapters;
+		int chosenAdapter = 0;
+
+		IDXGIFactory * pFactory = nullptr;
+		ptr_CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)&pFactory);
+
+		IDXGIAdapter *pAdapter;
+		for (UINT i = 0; pFactory->EnumAdapters(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; i++) {
+			adapters.push_back(pAdapter);
+			DXGI_ADAPTER_DESC desc;
+			pAdapter->GetDesc(&desc);
+			std::string str = ConvertWStringToUTF8(desc.Description);
+			adapterNames.push_back(str);
+			if (str == g_Config.sD3D11Device) {
+				chosenAdapter = i;
+			}
+		}
+
+		hr = CreateTheDevice(adapters[chosenAdapter]);
+		for (int i = 0; i < (int)adapters.size(); i++) {
+			adapters[i]->Release();
+		}
 	}
 
 	if (FAILED(hr)) {
@@ -112,7 +144,7 @@ bool D3D11Context::Init(HINSTANCE hInst, HWND wnd, std::string *error_message) {
 		bool yes = IDYES == MessageBox(hWnd_, error.c_str(), title.c_str(), MB_ICONERROR | MB_YESNO);
 		if (yes) {
 			// Change the config to D3D and restart.
-			g_Config.iGPUBackend = GPU_BACKEND_DIRECT3D9;
+			g_Config.iGPUBackend = (int)GPUBackend::DIRECT3D9;
 			g_Config.Save();
 
 			W32Util::ExitAndRestart();
@@ -138,7 +170,10 @@ bool D3D11Context::Init(HINSTANCE hInst, HWND wnd, std::string *error_message) {
 	}
 #endif
 
-	draw_ = Draw::T3DCreateD3D11Context(device_, context_, device1_, context1_, featureLevel_, hWnd_);
+	draw_ = Draw::T3DCreateD3D11Context(device_, context_, device1_, context1_, featureLevel_, hWnd_, adapterNames);
+	SetGPUBackend(GPUBackend::DIRECT3D11);
+	bool success = draw_->CreatePresets();  // If we can run D3D11, there's a compiler installed. I think.
+	assert(success);
 
 	int width;
 	int height;

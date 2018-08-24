@@ -46,6 +46,7 @@
 GameInfoCache *g_gameInfoCache;
 
 GameInfo::GameInfo() : fileType(IdentifiedFileType::UNKNOWN) {
+	pending = true;
 }
 
 GameInfo::~GameInfo() {
@@ -54,7 +55,7 @@ GameInfo::~GameInfo() {
 	icon.Clear();
 	pic0.Clear();
 	pic1.Clear();
-	delete fileLoader;
+	fileLoader.reset();
 }
 
 bool GameInfo::Delete() {
@@ -65,10 +66,7 @@ bool GameInfo::Delete() {
 			// Just delete the one file (TODO: handle two-disk games as well somehow).
 			const char *fileToRemove = filePath_.c_str();
 			File::Delete(fileToRemove);
-			auto i = std::find(g_Config.recentIsos.begin(), g_Config.recentIsos.end(), fileToRemove);
-			if (i != g_Config.recentIsos.end()) {
-				g_Config.recentIsos.erase(i);
-			}
+			g_Config.RemoveRecent(filePath_);
 			return true;
 		}
 	case IdentifiedFileType::PSP_PBP_DIRECTORY:
@@ -218,8 +216,7 @@ bool GameInfo::LoadFromPath(const std::string &gamePath) {
 	std::lock_guard<std::mutex> guard(lock);
 	// No need to rebuild if we already have it loaded.
 	if (filePath_ != gamePath) {
-		delete fileLoader;
-		fileLoader = ConstructFileLoader(gamePath);
+		fileLoader.reset(ConstructFileLoader(gamePath));
 		if (!fileLoader)
 			return false;
 		filePath_ = gamePath;
@@ -228,19 +225,18 @@ bool GameInfo::LoadFromPath(const std::string &gamePath) {
 		title = File::GetFilename(filePath_);
 	}
 
-	return fileLoader ? fileLoader->Exists() : true;
+	return true;
 }
 
-FileLoader *GameInfo::GetFileLoader() {
+std::shared_ptr<FileLoader> GameInfo::GetFileLoader() {
 	if (!fileLoader) {
-		fileLoader = ConstructFileLoader(filePath_);
+		fileLoader.reset(ConstructFileLoader(filePath_));
 	}
 	return fileLoader;
 }
 
 void GameInfo::DisposeFileLoader() {
-	delete fileLoader;
-	fileLoader = nullptr;
+	fileLoader.reset();
 }
 
 bool GameInfo::DeleteAllSaveData() {
@@ -302,16 +298,6 @@ std::string GameInfo::GetTitle() {
 	return title;
 }
 
-bool GameInfo::IsPending() {
-	std::lock_guard<std::mutex> guard(lock);
-	return pending;
-}
-
-bool GameInfo::IsWorking() {
-	std::lock_guard<std::mutex> guard(lock);
-	return working;
-}
-
 void GameInfo::SetTitle(const std::string &newTitle) {
 	std::lock_guard<std::mutex> guard(lock);
 	title = newTitle;
@@ -367,35 +353,38 @@ public:
 	}
 
 	void run() override {
-		if (!info_->LoadFromPath(gamePath_))
+		if (!info_->LoadFromPath(gamePath_)) {
+			info_->pending = false;
 			return;
-
-		{
-			std::lock_guard<std::mutex> lock(info_->lock);
-			info_->working = true;
-			info_->fileType = Identify_File(info_->GetFileLoader());
+		}
+		// In case of a remote file, check if it actually exists before locking.
+		if (!info_->GetFileLoader()->Exists()) {
+			info_->pending = false;
+			return;
 		}
 
+		info_->working = true;
+		info_->fileType = Identify_File(info_->GetFileLoader().get());
 		switch (info_->fileType) {
 		case IdentifiedFileType::PSP_PBP:
 		case IdentifiedFileType::PSP_PBP_DIRECTORY:
 			{
-				FileLoader *pbpLoader = info_->GetFileLoader();
-				std::unique_ptr<FileLoader> altLoader;
+				auto pbpLoader = info_->GetFileLoader();
 				if (info_->fileType == IdentifiedFileType::PSP_PBP_DIRECTORY) {
 					std::string ebootPath = ResolvePBPFile(gamePath_);
 					if (ebootPath != gamePath_) {
-						pbpLoader = ConstructFileLoader(ebootPath);
-						altLoader.reset(pbpLoader);
+						pbpLoader.reset(ConstructFileLoader(ebootPath));
 					}
 				}
 
-				PBPReader pbp(pbpLoader);
+				PBPReader pbp(pbpLoader.get());
 				if (!pbp.IsValid()) {
 					if (pbp.IsELF()) {
 						goto handleELF;
 					}
 					ERROR_LOG(LOADER, "invalid pbp %s\n", pbpLoader->Path().c_str());
+					info_->pending = false;
+					info_->working = false;
 					return;
 				}
 
@@ -471,13 +460,13 @@ handleELF:
 				std::string screenshot_jpg = GetSysDirectory(DIRECTORY_SCREENSHOT) + info_->id + "_00000.jpg";
 				std::string screenshot_png = GetSysDirectory(DIRECTORY_SCREENSHOT) + info_->id + "_00000.png";
 				// Try using png/jpg screenshots first
-				if (File::Exists(screenshot_png))
+				if (File::Exists(screenshot_png)) {
 					readFileToString(false, screenshot_png.c_str(), info_->icon.data);
-				else if (File::Exists(screenshot_jpg))
+				} else if (File::Exists(screenshot_jpg)) {
 					readFileToString(false, screenshot_jpg.c_str(), info_->icon.data);
-				else {
+				} else {
 					// Read standard icon
-					DEBUG_LOG(LOADER, "Loading unknown.png because there was an ELF");
+					VERBOSE_LOG(LOADER, "Loading unknown.png because there was an ELF");
 					ReadVFSToString("unknown.png", &info_->icon.data, &info_->lock);
 				}
 				info_->icon.dataLoaded = true;
@@ -517,6 +506,8 @@ handleELF:
 			if (File::Exists(screenshotPath)) {
 				if (readFileToString(false, screenshotPath.c_str(), info_->icon.data)) {
 					info_->icon.dataLoaded = true;
+				} else {
+					ERROR_LOG(G3D, "Error loading screenshot data: '%s'", screenshotPath.c_str());
 				}
 			}
 			break;
@@ -559,12 +550,18 @@ handleELF:
 				// Let's assume it's an ISO.
 				// TODO: This will currently read in the whole directory tree. Not really necessary for just a
 				// few files.
-				FileLoader *fl = info_->GetFileLoader();
-				if (!fl)
+				auto fl = info_->GetFileLoader();
+				if (!fl) {
+					info_->pending = false;
+					info_->working = false;
 					return;  // Happens with UWP currently, TODO...
-				BlockDevice *bd = constructBlockDevice(info_->GetFileLoader());
-				if (!bd)
+				}
+				BlockDevice *bd = constructBlockDevice(info_->GetFileLoader().get());
+				if (!bd) {
+					info_->pending = false;
+					info_->working = false;
 					return;  // nothing to do here..
+				}
 				ISOFileSystem umd(&handles, bd);
 
 				// Alright, let's fetch the PARAM.SFO.
@@ -643,13 +640,17 @@ handleELF:
 			info_->installDataSize = info_->GetInstallDataSizeInBytes();
 		}
 
-		std::lock_guard<std::mutex> lock(info_->lock);
 		info_->pending = false;
 		info_->working = false;
 		// ILOG("Completed writing info for %s", info_->GetTitle().c_str());
 	}
 
 	float priority() override {
+		auto fl = info_->GetFileLoader();
+		if (fl && fl->IsRemote()) {
+			// Increase the value so remote info loads after non-remote.
+			return info_->lastAccessedTime + 1000.0f;
+		}
 		return info_->lastAccessedTime;
 	}
 
@@ -674,6 +675,8 @@ void GameInfoCache::Init() {
 }
 
 void GameInfoCache::Shutdown() {
+	CancelAll();
+
 	if (gameInfoWQ_) {
 		StopProcessingWorkQueue(gameInfoWQ_);
 		delete gameInfoWQ_;
@@ -682,11 +685,22 @@ void GameInfoCache::Shutdown() {
 }
 
 void GameInfoCache::Clear() {
+	CancelAll();
+
 	if (gameInfoWQ_) {
 		gameInfoWQ_->Flush();
 		gameInfoWQ_->WaitUntilDone();
 	}
 	info_.clear();
+}
+
+void GameInfoCache::CancelAll() {
+	for (auto info : info_) {
+		auto fl = info.second->GetFileLoader();
+		if (fl) {
+			fl->Cancel();
+		}
+	}
 }
 
 void GameInfoCache::FlushBGs() {
@@ -707,7 +721,8 @@ void GameInfoCache::PurgeType(IdentifiedFileType fileType) {
 		gameInfoWQ_->Flush();
 	restart:
 	for (auto iter = info_.begin(); iter != info_.end(); iter++) {
-		if (iter->second->fileType == fileType) {
+		auto &info = iter->second;
+		if (!info->working && info->fileType == fileType) {
 			info_.erase(iter);
 			goto restart;
 		}
@@ -715,7 +730,7 @@ void GameInfoCache::PurgeType(IdentifiedFileType fileType) {
 }
 
 void GameInfoCache::WaitUntilDone(std::shared_ptr<GameInfo> &info) {
-	while (info->IsPending()) {
+	while (info->pending) {
 		if (gameInfoWQ_->WaitUntilDone(false)) {
 			// A true return means everything finished, so bail out.
 			// This way even if something gets stuck, we won't hang.
@@ -755,7 +770,7 @@ std::shared_ptr<GameInfo> GameInfoCache::GetInfo(Draw::DrawContext *draw, const 
 		info = std::make_shared<GameInfo>();
 	}
 
-	if (info->IsWorking()) {
+	if (info->working) {
 		// Uh oh, it's currently in process.  It could mark pending = false with the wrong wantFlags.
 		// Let's wait it out, then queue.
 		// NOTE: This is bad because we're likely on the UI thread....
@@ -784,6 +799,8 @@ void GameInfoCache::SetupTexture(std::shared_ptr<GameInfo> &info, Draw::DrawCont
 			tex.texture = CreateTextureFromFileData(thin3d, (const uint8_t *)tex.data.data(), (int)tex.data.size(), ImageFileType::DETECT);
 			if (tex.texture) {
 				tex.timeLoaded = time_now_d();
+			} else {
+				ERROR_LOG(G3D, "Failed creating texture");
 			}
 		}
 		if ((info->wantFlags & GAMEINFO_WANTBGDATA) == 0) {

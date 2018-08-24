@@ -7,6 +7,8 @@
 #include "math/math_util.h"
 #include "math/lin/vec3.h"
 #include "GPU/GPUState.h"
+#include "GPU/Common/FramebufferCommon.h"
+#include "GPU/Common/GPUStateUtils.h"
 #include "GPU/Math3D.h"
 #include "Core/Reporting.h"
 #include "Core/Config.h"
@@ -81,7 +83,7 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 			ConvertProjMatrixToVulkan(flippedMatrix);
 		}
 
-		if (g_Config.iRenderingMode == 0 && g_display_rotation != DisplayRotation::ROTATE_0) {
+		if (g_Config.iRenderingMode == FB_NON_BUFFERED_MODE && g_display_rotation != DisplayRotation::ROTATE_0) {
 			flippedMatrix = flippedMatrix * g_display_rot_matrix;
 		}
 
@@ -95,7 +97,7 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 		} else {
 			proj_through.setOrthoVulkan(0.0f, gstate_c.curRTWidth, 0, gstate_c.curRTHeight, 0, 1);
 		}
-		if (g_Config.iRenderingMode == 0 && g_display_rotation != DisplayRotation::ROTATE_0) {
+		if (g_Config.iRenderingMode == FB_NON_BUFFERED_MODE && g_display_rotation != DisplayRotation::ROTATE_0) {
 			proj_through = proj_through * g_display_rot_matrix;
 		}
 		CopyMatrix4x4(ub->proj_through, proj_through.getReadPtr());
@@ -112,30 +114,32 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 		ConvertMatrix4x3To3x4Transposed(ub->tex, gstate.tgenMatrix);
 	}
 
-	// Combined two small uniforms
-	if (dirtyUniforms & (DIRTY_FOGCOEF | DIRTY_STENCILREPLACEVALUE)) {
-		float fogcoef_stencil[3] = {
+	if (dirtyUniforms & DIRTY_FOGCOEF) {
+		float fogcoef[2] = {
 			getFloat24(gstate.fog1),
 			getFloat24(gstate.fog2),
-			(float)gstate.getStencilTestRef()/255.0f
 		};
-		if (my_isinf(fogcoef_stencil[1])) {
+		if (my_isinf(fogcoef[1])) {
 			// not really sure what a sensible value might be.
-			fogcoef_stencil[1] = fogcoef_stencil[1] < 0.0f ? -10000.0f : 10000.0f;
-		} else if (my_isnan(fogcoef_stencil[1])) {
+			fogcoef[1] = fogcoef[1] < 0.0f ? -10000.0f : 10000.0f;
+		} else if (my_isnan(fogcoef[1])) {
 			// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
 			// Just put the fog far away at a large finite distance.
 			// Infinities and NaNs are rather unpredictable in shaders on many GPUs
 			// so it's best to just make it a sane calculation.
-			fogcoef_stencil[0] = 100000.0f;
-			fogcoef_stencil[1] = 1.0f;
+			fogcoef[0] = 100000.0f;
+			fogcoef[1] = 1.0f;
 		}
 #ifndef MOBILE_DEVICE
-		else if (my_isnanorinf(fogcoef_stencil[1]) || my_isnanorinf(fogcoef_stencil[0])) {
-			ERROR_LOG_REPORT_ONCE(fognan, G3D, "Unhandled fog NaN/INF combo: %f %f", fogcoef_stencil[0], fogcoef_stencil[1]);
+		else if (my_isnanorinf(fogcoef[1]) || my_isnanorinf(fogcoef[0])) {
+			ERROR_LOG_REPORT_ONCE(fognan, G3D, "Unhandled fog NaN/INF combo: %f %f", fogcoef[0], fogcoef[1]);
 		}
 #endif
-		CopyFloat3(ub->fogCoef_stencil, fogcoef_stencil);
+		CopyFloat2(ub->fogCoef, fogcoef);
+	}
+
+	if (dirtyUniforms & DIRTY_STENCILREPLACEVALUE) {
+		ub->stencil = (float)gstate.getStencilTestRef() / 255.0;
 	}
 
 	// Note - this one is not in lighting but in transformCommon as it has uses beyond lighting
@@ -167,30 +171,27 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 	}
 
 	if (dirtyUniforms & DIRTY_DEPTHRANGE) {
-		float viewZScale = gstate.getViewportZScale();
-		float viewZCenter = gstate.getViewportZCenter();
+		// Same formulas as D3D9 now. Should work for both Vulkan and D3D11.
 
-		// We had to scale and translate Z to account for our clamped Z range.
-		// Therefore, we also need to reverse this to round properly.
-		//
-		// Example: scale = 65535.0, center = 0.0
-		// Resulting range = -65535 to 65535, clamped to [0, 65535]
-		// gstate_c.vpDepthScale = 2.0f
-		// gstate_c.vpZOffset = -1.0f
-		//
-		// The projection already accounts for those, so we need to reverse them.
-		//
-		// Additionally, D3D9 uses a range from [0, 1].  We double and move the center.
-		viewZScale *= (1.0f / gstate_c.vpDepthScale) * 2.0f;
-		viewZCenter -= 65535.0f * gstate_c.vpZOffset + 32768.5f;
+		// Depth is [0, 1] mapping to [minz, maxz], not too hard.
+		float vpZScale = gstate.getViewportZScale();
+		float vpZCenter = gstate.getViewportZCenter();
 
+		// These are just the reverse of the formulas in GPUStateUtils.
+		float halfActualZRange = vpZScale / gstate_c.vpDepthScale;
+		float minz = -((gstate_c.vpZOffset * halfActualZRange) - vpZCenter) - halfActualZRange;
+		float viewZScale = halfActualZRange * 2.0f;
+		// Account for the half pixel offset.
+		float viewZCenter = minz + (DepthSliceFactor() / 256.0f) * 0.5f;
 		float viewZInvScale;
+
 		if (viewZScale != 0.0) {
 			viewZInvScale = 1.0f / viewZScale;
 		} else {
 			viewZInvScale = 0.0;
 		}
 
+		float data[4] = { viewZScale, viewZCenter, viewZCenter, viewZInvScale };
 		ub->depthRange[0] = viewZScale;
 		ub->depthRange[1] = viewZCenter;
 		ub->depthRange[2] = viewZCenter;
@@ -198,10 +199,18 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 	}
 
 	if (dirtyUniforms & DIRTY_BEZIERSPLINE) {
-		ub->spline_count_u = gstate_c.spline_count_u;
-		ub->spline_count_v = gstate_c.spline_count_v;
-		ub->spline_type_u = gstate_c.spline_type_u;
-		ub->spline_type_v = gstate_c.spline_type_v;
+		ub->spline_counts = BytesToUint32(gstate_c.spline_count_u, gstate_c.spline_count_v, gstate_c.spline_type_u, gstate_c.spline_type_v);
+	}
+
+	if (dirtyUniforms & DIRTY_DEPAL) {
+		int indexMask = gstate.getClutIndexMask();
+		int indexShift = gstate.getClutIndexShift();
+		int indexOffset = gstate.getClutIndexStartPos() >> 4;
+		int format = gstate_c.depalFramebufferFormat;
+		uint32_t val = BytesToUint32(indexMask, indexShift, indexOffset, format);
+		// Poke in a bilinear filter flag in the top bit.
+		val |= gstate.isMagnifyFilteringEnabled() << 31;
+		ub->depal_mask_shift_off_fmt = val;
 	}
 }
 
@@ -238,8 +247,8 @@ void LightUpdateUniforms(UB_VS_Lights *ub, uint64_t dirtyUniforms) {
 			}
 			ExpandFloat24x3ToFloat4(ub->ldir[i], &gstate.ldir[i * 3]);
 			ExpandFloat24x3ToFloat4(ub->latt[i], &gstate.latt[i * 3]);
-			CopyFloat1To4(ub->lightAngle[i], getFloat24(gstate.lcutoff[i]));
-			CopyFloat1To4(ub->lightSpotCoef[i], getFloat24(gstate.lconv[i]));
+			float lightAngle_spotCoef[2] = { getFloat24(gstate.lcutoff[i]), getFloat24(gstate.lconv[i]) };
+			CopyFloat2To4(ub->lightAngle_SpotCoef[i], lightAngle_spotCoef);
 			Uint8x3ToFloat4(ub->lightAmbient[i], gstate.lcolor[i * 3]);
 			Uint8x3ToFloat4(ub->lightDiffuse[i], gstate.lcolor[i * 3 + 1]);
 			Uint8x3ToFloat4(ub->lightSpecular[i], gstate.lcolor[i * 3 + 2]);

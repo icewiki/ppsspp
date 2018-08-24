@@ -66,16 +66,23 @@ bool PSP_InitStart(const CoreParameter &coreParam, std::string *error_string);
 bool PSP_InitUpdate(std::string *error_string);
 bool PSP_IsIniting();
 bool PSP_IsInited();
+bool PSP_IsQuitting();
 void PSP_Shutdown();
 
 void PSP_BeginHostFrame();
 void PSP_EndHostFrame();
+void PSP_RunLoopWhileState();
 void PSP_RunLoopUntil(u64 globalticks);
 void PSP_RunLoopFor(int cycles);
 
-void Audio_Init();
+void PSP_SetLoading(const std::string &reason);
+std::string PSP_GetLoading();
 
-bool IsOnSeparateCPUThread();
+// Call before PSP_BeginHostFrame() in order to not miss any GPU stats.
+void Core_UpdateDebugStats(bool collectStats);
+
+void Audio_Init();
+void Audio_Shutdown();
 bool IsAudioInitialised();
 
 void UpdateLoadedFile(FileLoader *fileLoader);

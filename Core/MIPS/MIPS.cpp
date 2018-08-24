@@ -22,6 +22,7 @@
 
 #include "Common.h"
 #include "Common/ChunkFile.h"
+#include "Core/ConfigValues.h"
 #include "Core/MIPS/MIPS.h"
 #include "Core/MIPS/MIPSInt.h"
 #include "Core/MIPS/MIPSTables.h"
@@ -262,7 +263,7 @@ void MIPSState::DoState(PointerWrap &p) {
 	if (MIPSComp::jit)
 		MIPSComp::jit->DoState(p);
 	else
-		MIPSComp::jit->DoDummyState(p);
+		MIPSComp::DoDummyJitState(p);
 
 	p.DoArray(r, sizeof(r) / sizeof(r[0]));
 	p.DoArray(f, sizeof(f) / sizeof(f[0]));
@@ -293,6 +294,11 @@ void MIPSState::DoState(PointerWrap &p) {
 	p.Do(inDelaySlot);
 	p.Do(llBit);
 	p.Do(debugCount);
+
+	if (p.mode == p.MODE_READ && MIPSComp::jit) {
+		// Now that we've loaded fcr31, update any jit state associated.
+		MIPSComp::jit->UpdateFCR31();
+	}
 }
 
 void MIPSState::SingleStep() {

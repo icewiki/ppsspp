@@ -66,6 +66,9 @@ public:
 
 	virtual ~FileLoader() {}
 
+	virtual bool IsRemote() {
+		return false;
+	}
 	virtual bool Exists() = 0;
 	virtual bool ExistsFast() {
 		return Exists();
@@ -86,6 +89,10 @@ public:
 	virtual size_t ReadAt(s64 absolutePos, size_t bytes, void *data, Flags flags = Flags::NONE) {
 		return ReadAt(absolutePos, 1, bytes, data, flags);
 	}
+
+	// Cancel any operations that might block, if possible.
+	virtual void Cancel() {
+	}
 };
 
 inline u32 operator & (const FileLoader::Flags &a, const FileLoader::Flags &b) {
@@ -103,6 +110,7 @@ IdentifiedFileType Identify_File(FileLoader *fileLoader);
 
 class FileLoaderFactory {
 public:
+	virtual ~FileLoaderFactory() {}
 	virtual FileLoader *ConstructFileLoader(const std::string &filename) = 0;
 };
 void RegisterFileLoaderFactory(std::string name, std::unique_ptr<FileLoaderFactory> factory);

@@ -18,7 +18,7 @@
 #include "Core/MemMap.h"
 #include "Core/Reporting.h"
 #include "Core/MIPS/MIPSTables.h"
-#include "ElfReader.h"
+#include "Core/ELF/ElfReader.h"
 #include "Core/Debugger/Breakpoints.h"
 #include "Core/Debugger/SymbolMap.h"
 #include "Core/HLE/sceKernelMemory.h"
@@ -29,7 +29,7 @@ const char *ElfReader::GetSectionName(int section) const {
 		return nullptr;
 
 	int nameOffset = sections[section].sh_name;
-	if (nameOffset < 0 || nameOffset >= size_) {
+	if (nameOffset < 0 || (size_t)nameOffset >= size_) {
 		ERROR_LOG(LOADER, "ELF: Bad name offset %d in section %d (max = %d)", nameOffset, section, (int)size_);
 		return nullptr;
 	}
@@ -631,6 +631,17 @@ u32 ElfReader::GetTotalSectionSizeByPrefix(const std::string &prefix) const {
 		}
 	}
 	return total;
+}
+
+std::vector<SectionID> ElfReader::GetCodeSections() const {
+	std::vector<SectionID> ids;
+	for (int i = 0; i < GetNumSections(); ++i) {
+		u32 flags = sections[i].sh_flags;
+		if ((flags & (SHF_ALLOC | SHF_EXECINSTR)) == (SHF_ALLOC | SHF_EXECINSTR)) {
+			ids.push_back(i);
+		}
+	}
+	return ids;
 }
 
 bool ElfReader::LoadSymbols()

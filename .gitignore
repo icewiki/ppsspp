@@ -38,6 +38,7 @@ PPSSPPDebug.exe.manifest
 assets/flash0
 UWP/icph
 UWP/.vs
+.vs
 
 # For Mac
 .DS_Store
@@ -61,7 +62,6 @@ build*/
 
 # Temp file used by jenkins windows build (TODO: remove)
 desc.txt
-
 
 Logs
 Memstick
@@ -95,6 +95,9 @@ tags
 debian/files
 debian/ppsspp.substvars
 debian/ppsspp/
+
+# Libretro build
+*.o
 
 # YouCompleteMe file
 .ycm_extra_conf.pyc

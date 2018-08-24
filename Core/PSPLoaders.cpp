@@ -15,8 +15,11 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <thread>
+
 #include "file/file_util.h"
 #include "util/text/utf8.h"
+#include "thread/threadutil.h"
 
 #include "Common/FileUtil.h"
 #include "Common/StringUtils.h"
@@ -45,6 +48,7 @@
 #include "Host.h"
 
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/System.h"
 #include "Core/PSPLoaders.h"
 #include "Core/HLE/HLE.h"
@@ -248,8 +252,24 @@ bool Load_PSP_ISO(FileLoader *fileLoader, std::string *error_string) {
 
 	//in case we didn't go through EmuScreen::boot
 	g_Config.loadGameConfig(id);
+	host->SendUIMessage("config_loaded", "");
 	INFO_LOG(LOADER,"Loading %s...", bootpath.c_str());
-	return __KernelLoadExec(bootpath.c_str(), 0, error_string);
+
+	std::thread th([bootpath] {
+		setCurrentThreadName("ExecLoader");
+		PSP_SetLoading("Loading executable...");
+		// TODO: We can't use the initial error_string pointer.
+		bool success = __KernelLoadExec(bootpath.c_str(), 0, &PSP_CoreParameter().errorString);
+		if (success && coreState == CORE_POWERUP) {
+			coreState = PSP_CoreParameter().startBreak ? CORE_STEPPING : CORE_RUNNING;
+		} else {
+			coreState = CORE_ERROR;
+			// TODO: This is a crummy way to communicate the error...
+			PSP_CoreParameter().fileToStart = "";
+		}
+	});
+	th.detach();
+	return true;
 }
 
 static std::string NormalizePath(const std::string &path) {
@@ -353,13 +373,34 @@ bool Load_PSP_ELF_PBP(FileLoader *fileLoader, std::string *error_string) {
 	}
 	// End of temporary code
 
-	return __KernelLoadExec(finalName.c_str(), 0, error_string);
+	std::thread th([finalName] {
+		bool success = __KernelLoadExec(finalName.c_str(), 0, &PSP_CoreParameter().errorString);
+		if (success && coreState == CORE_POWERUP) {
+			coreState = PSP_CoreParameter().startBreak ? CORE_STEPPING : CORE_RUNNING;
+		} else {
+			coreState = CORE_ERROR;
+			// TODO: This is a crummy way to communicate the error...
+			PSP_CoreParameter().fileToStart = "";
+		}
+	});
+	th.detach();
+	return true;
 }
 
 bool Load_PSP_GE_Dump(FileLoader *fileLoader, std::string *error_string) {
 	BlobFileSystem *umd = new BlobFileSystem(&pspFileSystem, fileLoader, "data.ppdmp");
 	pspFileSystem.Mount("disc0:", umd);
 
-	__KernelLoadGEDump("disc0:/data.ppdmp", error_string);
+	std::thread th([] {
+		bool success = __KernelLoadGEDump("disc0:/data.ppdmp", &PSP_CoreParameter().errorString);
+		if (success && coreState == CORE_POWERUP) {
+			coreState = PSP_CoreParameter().startBreak ? CORE_STEPPING : CORE_RUNNING;
+		} else {
+			coreState = CORE_ERROR;
+			// TODO: This is a crummy way to communicate the error...
+			PSP_CoreParameter().fileToStart = "";
+		}
+	});
+	th.detach();
 	return true;
 }

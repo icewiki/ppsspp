@@ -31,7 +31,7 @@ class D3D11PushBuffer;
 
 class D3D11FragmentShader {
 public:
-	D3D11FragmentShader(ID3D11Device *device, D3D_FEATURE_LEVEL featureLevel, ShaderID id, const char *code, bool useHWTransform);
+	D3D11FragmentShader(ID3D11Device *device, D3D_FEATURE_LEVEL featureLevel, FShaderID id, const char *code, bool useHWTransform);
 	~D3D11FragmentShader();
 
 	const std::string &source() const { return source_; }
@@ -49,24 +49,18 @@ protected:
 	std::string source_;
 	bool failed_;
 	bool useHWTransform_;
-	ShaderID id_;
+	FShaderID id_;
 };
 
 class D3D11VertexShader {
 public:
-	D3D11VertexShader(ID3D11Device *device, D3D_FEATURE_LEVEL featureLevel, ShaderID id, const char *code, int vertType, bool useHWTransform, bool usesLighting);
+	D3D11VertexShader(ID3D11Device *device, D3D_FEATURE_LEVEL featureLevel, VShaderID id, const char *code, int vertType, bool useHWTransform);
 	~D3D11VertexShader();
 
 	const std::string &source() const { return source_; }
 	const std::vector<uint8_t> &bytecode() const { return bytecode_; }
 	bool Failed() const { return failed_; }
 	bool UseHWTransform() const { return useHWTransform_; }
-	bool HasBones() const {
-		return id_.Bit(VS_BIT_ENABLE_BONES);
-	}
-	bool HasLights() const {
-		return usesLighting_;
-	}
 
 	std::string GetShaderString(DebugShaderStringType type) const;
 	ID3D11VertexShader *GetShader() const { return module_; }
@@ -80,8 +74,7 @@ protected:
 
 	bool failed_;
 	bool useHWTransform_;
-	bool usesLighting_;
-	ShaderID id_;
+	VShaderID id_;
 };
 
 class D3D11PushBuffer;
@@ -110,12 +103,6 @@ public:
 	bool IsLightDirty() { return true; }
 	bool IsBoneDirty() { return true; }
 
-	/*
-	uint32_t PushBaseBuffer(D3D11PushBuffer *dest, VkBuffer *buf);
-	uint32_t PushLightBuffer(D3D11PushBuffer *dest, VkBuffer *buf);
-	uint32_t PushBoneBuffer(D3D11PushBuffer *dest, VkBuffer *buf);
-	*/
-
 private:
 	void Clear();
 
@@ -123,10 +110,10 @@ private:
 	ID3D11DeviceContext *context_;
 	D3D_FEATURE_LEVEL featureLevel_;
 
-	typedef std::map<ShaderID, D3D11FragmentShader *> FSCache;
+	typedef std::map<FShaderID, D3D11FragmentShader *> FSCache;
 	FSCache fsCache_;
 
-	typedef std::map<ShaderID, D3D11VertexShader *> VSCache;
+	typedef std::map<VShaderID, D3D11VertexShader *> VSCache;
 	VSCache vsCache_;
 
 	char *codeBuffer_;
@@ -144,6 +131,6 @@ private:
 	D3D11FragmentShader *lastFShader_;
 	D3D11VertexShader *lastVShader_;
 
-	ShaderID lastFSID_;
-	ShaderID lastVSID_;
+	FShaderID lastFSID_;
+	VShaderID lastVSID_;
 };

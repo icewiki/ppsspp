@@ -39,7 +39,6 @@ public:
 	virtual ~ArmJit();
 
 	void DoState(PointerWrap &p) override;
-	void DoDummyState(PointerWrap &p) override;
 
 	const JitOptions &GetJitOptions() { return jo; }
 
@@ -169,12 +168,14 @@ public:
 	int Replace_fabsf() override;
 
 	JitBlockCache *GetBlockCache() override { return &blocks; }
+	JitBlockCacheDebugInterface *GetBlockCacheDebugInterface() override { return &blocks; }
 
 	std::vector<u32> SaveAndClearEmuHackOps() override { return blocks.SaveAndClearEmuHackOps(); }
 	void RestoreSavedEmuHackOps(std::vector<u32> saved) override { blocks.RestoreSavedEmuHackOps(saved); }
 
 	void ClearCache() override;
 	void InvalidateCacheAt(u32 em_address, int length = 4) override;
+	void UpdateFCR31() override;
 
 	void EatPrefix() override { js.EatPrefix(); }
 
@@ -202,7 +203,7 @@ private:
 	void WriteDownCountR(ArmGen::ARMReg reg);
 	void RestoreRoundingMode(bool force = false);
 	void ApplyRoundingMode(bool force = false);
-	void UpdateRoundingMode();
+	void UpdateRoundingMode(u32 fcr31 = -1);
 	void MovFromPC(ArmGen::ARMReg r);
 	void MovToPC(ArmGen::ARMReg r);
 
@@ -214,6 +215,8 @@ private:
 	void WriteExit(u32 destination, int exit_num);
 	void WriteExitDestInR(ArmGen::ARMReg Reg);
 	void WriteSyscallExit();
+	bool CheckJitBreakpoint(u32 addr, int downcountOffset);
+	bool CheckMemoryBreakpoint(int instructionOffset = 0);
 
 	// Utility compilation functions
 	void BranchFPFlag(MIPSOpcode op, CCFlags cc, bool likely);
@@ -310,9 +313,6 @@ public:
 
 	const u8 *restoreRoundingMode;
 	const u8 *applyRoundingMode;
-	const u8 *updateRoundingMode;
-
-	const u8 *breakpointBailout;
 };
 
 }	// namespace MIPSComp

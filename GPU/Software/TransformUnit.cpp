@@ -53,8 +53,8 @@ SoftwareDrawEngine::~SoftwareDrawEngine() {
 void SoftwareDrawEngine::DispatchFlush() {
 }
 
-void SoftwareDrawEngine::DispatchSubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int *bytesRead) {
-	transformUnit.SubmitPrimitive(verts, inds, prim, vertexCount, vertType, bytesRead, this);
+void SoftwareDrawEngine::DispatchSubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertTypeID, int *bytesRead) {
+	transformUnit.SubmitPrimitive(verts, inds, prim, vertexCount, vertTypeID, bytesRead, this);
 }
 
 VertexDecoder *SoftwareDrawEngine::FindVertexDecoder(u32 vtype) {
@@ -104,16 +104,23 @@ static inline ScreenCoords ClipToScreenInternal(const ClipCoords& coords, bool *
 	float y = coords.y * yScale / coords.w + yCenter;
 	float z = coords.z * zScale / coords.w + zCenter;
 
-	// Is this really right?
-	if (gstate.clipEnable & 0x1) {
+	// Account for rounding for X and Y.
+	// TODO: Validate actual rounding range.
+	const float SCREEN_BOUND = 4095.0f + (15.5f / 16.0f);
+	const float DEPTH_BOUND = 65535.5f;
+
+	// This matches hardware tests - depth is clamped when this flag is on.
+	if (gstate.isDepthClampEnabled()) {
+		// Note: if the depth is clamped, the outside_range_flag should NOT be set, even for x and y.
 		if (z < 0.f)
 			z = 0.f;
-		if (z > 65535.f)
-			z = 65535.f;
-	}
-
-	if (outside_range_flag && (x > 4095.9375f || y > 4095.9375f || x < 0 || y < 0 || z < 0 || z > 65535.f))
+		else if (z > 65535.0f)
+			z = 65535.0f;
+		else if (outside_range_flag && (x >= SCREEN_BOUND || y >= SCREEN_BOUND || x < 0 || y < 0))
+			*outside_range_flag = true;
+	} else if (outside_range_flag && (x > SCREEN_BOUND || y >= SCREEN_BOUND || x < 0 || y < 0 || z < 0 || z >= DEPTH_BOUND)) {
 		*outside_range_flag = true;
+	}
 
 	// 16 = 0xFFFF / 4095.9375
 	// Round up at 0.625 to the nearest subpixel.

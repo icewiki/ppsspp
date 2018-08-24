@@ -346,14 +346,12 @@ void JitSafeMem::Finish()
 		jit_->SetJumpTarget(*it);
 }
 
-void JitSafeMem::MemCheckImm(MemoryOpType type)
-{
-	MemCheck *check = CBreakPoints::GetMemCheck(iaddr_, size_);
-	if (check)
-	{
-		if (!(check->cond & MEMCHECK_READ) && type == MEM_READ)
+void JitSafeMem::MemCheckImm(MemoryOpType type) {
+	MemCheck check;
+	if (CBreakPoints::GetMemCheckInRange(iaddr_, size_, &check)) {
+		if (!(check.cond & MEMCHECK_READ) && type == MEM_READ)
 			return;
-		if (!(check->cond & MEMCHECK_WRITE) && type == MEM_WRITE)
+		if (!(check.cond & MEMCHECK_WRITE) && type == MEM_WRITE)
 			return;
 
 		jit_->MOV(32, MIPSSTATE_VAR(pc), Imm32(jit_->GetCompilerPC()));
@@ -376,17 +374,10 @@ void JitSafeMem::MemCheckImm(MemoryOpType type)
 
 void JitSafeMem::MemCheckAsm(MemoryOpType type)
 {
-	const auto memchecks = CBreakPoints::GetMemCheckRanges();
-	bool possible = false;
+	const auto memchecks = CBreakPoints::GetMemCheckRanges(type == MEM_WRITE);
+	bool possible = !memchecks.empty();
 	for (auto it = memchecks.begin(), end = memchecks.end(); it != end; ++it)
 	{
-		if (!(it->cond & MEMCHECK_READ) && type == MEM_READ)
-			continue;
-		if (!(it->cond & MEMCHECK_WRITE) && type == MEM_WRITE)
-			continue;
-
-		possible = true;
-
 		FixupBranch skipNext, skipNextRange;
 		if (it->end != 0)
 		{
@@ -440,6 +431,7 @@ void JitSafeMemFuncs::Init(ThunkManager *thunks) {
 	AllocCodeSpace(FUNCS_ARENA_SIZE);
 	thunks_ = thunks;
 
+	BeginWrite();
 	readU32 = GetCodePtr();
 	CreateReadFunc(32, (const void *)&Memory::Read_U32);
 	readU16 = GetCodePtr();
@@ -453,6 +445,7 @@ void JitSafeMemFuncs::Init(ThunkManager *thunks) {
 	CreateWriteFunc(16, (const void *)&Memory::Write_U16);
 	writeU8 = GetCodePtr();
 	CreateWriteFunc(8, (const void *)&Memory::Write_U8);
+	EndWrite();
 }
 
 void JitSafeMemFuncs::Shutdown() {

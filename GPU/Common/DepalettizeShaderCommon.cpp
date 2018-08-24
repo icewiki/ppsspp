@@ -36,19 +36,20 @@ void GenerateDepalShader300(char *buffer, GEBufferFormat pixelFormat, ShaderLang
 	if (language == HLSL_D3D11) {
 		WRITE(p, "SamplerState texSamp : register(s0);\n");
 		WRITE(p, "Texture2D<float4> tex : register(t0);\n");
-		WRITE(p, "Texture2D<float4> pal : register(t1);\n");
+		WRITE(p, "Texture2D<float4> pal : register(t3);\n");
 	} else if (language == GLSL_VULKAN) {
-		WRITE(p, "#version 140\n");
+		WRITE(p, "#version 450\n");
 		WRITE(p, "#extension GL_ARB_separate_shader_objects : enable\n");
 		WRITE(p, "#extension GL_ARB_shading_language_420pack : enable\n");
 		WRITE(p, "layout(set = 0, binding = 0) uniform sampler2D tex;\n");
 		WRITE(p, "layout(set = 0, binding = 1) uniform sampler2D pal;\n");
 		WRITE(p, "layout(location = 0) in vec2 v_texcoord0;\n");
-		WRITE(p, "layout(location = 0) out vec4 fragColor0\n;");
+		WRITE(p, "layout(location = 0) out vec4 fragColor0;\n");
 	} else {
 		if (gl_extensions.IsGLES) {
 			WRITE(p, "#version 300 es\n");
 			WRITE(p, "precision mediump float;\n");
+			WRITE(p, "precision highp int;\n");
 		} else {
 			WRITE(p, "#version 330\n");
 		}
@@ -70,7 +71,7 @@ void GenerateDepalShader300(char *buffer, GEBufferFormat pixelFormat, ShaderLang
 	int mask = gstate.getClutIndexMask();
 	int shift = gstate.getClutIndexShift();
 	int offset = gstate.getClutIndexStartPos();
-	const GEPaletteFormat clutFormat = gstate.getClutPaletteFormat();
+	GEPaletteFormat clutFormat = gstate.getClutPaletteFormat();
 	// Unfortunately sampling turned our texture into floating point. To avoid this, might be able
 	// to declare them as isampler2D objects, but these require integer textures, which needs more work.
 	// Anyhow, we simply work around this by converting back to integer. Hopefully there will be no loss of precision.
@@ -113,7 +114,7 @@ void GenerateDepalShader300(char *buffer, GEBufferFormat pixelFormat, ShaderLang
 		texturePixels = 512;
 
 	if (shift) {
-		WRITE(p, "  index = (int(uint(index) >> %i) & 0x%02x)", shift, mask);
+		WRITE(p, "  index = (int(uint(index) >> uint(%i)) & 0x%02x)", shift, mask);
 	} else {
 		WRITE(p, "  index = (index & 0x%02x)", mask);
 	}
@@ -285,7 +286,19 @@ void GenerateDepalShader(char *buffer, GEBufferFormat pixelFormat, ShaderLanguag
 	case HLSL_DX9:
 		GenerateDepalShaderFloat(buffer, pixelFormat, language);
 		break;
+	case HLSL_D3D11_LEVEL9:
+	default:
+		_assert_msg_(G3D, false, "Depal shader language not supported: %d", (int)language);
 	}
+}
+
+uint32_t DepalShaderCacheCommon::GenerateShaderID(uint32_t clutMode, GEBufferFormat pixelFormat) const {
+	return (clutMode & 0xFFFFFF) | (pixelFormat << 24);
+}
+
+uint32_t DepalShaderCacheCommon::GetClutID(GEPaletteFormat clutFormat, uint32_t clutHash) const {
+	// Simplistic.
+	return clutHash ^ (uint32_t)clutFormat;
 }
 
 #undef WRITE

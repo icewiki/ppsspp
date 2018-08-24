@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <map>
 #include <d3d11.h>
 #include <d3d11_1.h>
 
@@ -104,8 +105,6 @@ public:
 	DrawEngineD3D11(Draw::DrawContext *draw, ID3D11Device *device, ID3D11DeviceContext *context);
 	virtual ~DrawEngineD3D11();
 
-	void SubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int *bytesRead);
-
 	void SetShaderManager(ShaderManagerD3D11 *shaderManager) {
 		shaderManager_ = shaderManager;
 	}
@@ -120,9 +119,6 @@ public:
 
 	void BeginFrame();
 
-	void SetupVertexDecoder(u32 vertType);
-	void SetupVertexDecoderInternal(u32 vertType);
-
 	// So that this can be inlined
 	void Flush() {
 		if (!numDrawCalls)
@@ -133,29 +129,23 @@ public:
 	void FinishDeferred() {
 		if (!numDrawCalls)
 			return;
-		DecodeVerts();
+		DecodeVerts(decoded);
 	}
-
-	bool IsCodePtrVertexDecoder(const u8 *ptr) const;
 
 	void DispatchFlush() override { Flush(); }
-	void DispatchSubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int *bytesRead) override {
-		SubmitPrim(verts, inds, prim, vertexCount, vertType, bytesRead);
-	}
 
 	void ClearTrackedVertexArrays() override;
 
 	void Resized() override;
 
+	void ClearInputLayoutMap();
+
 private:
-	void DecodeVerts();
 	void DoFlush();
 
 	void ApplyDrawState(int prim);
 	void ApplyDrawStateLate(bool applyStencilRef, uint8_t stencilRef);
 	void ResetShaderBlending();
-
-	void ClearInputLayoutMap();
 
 	ID3D11InputLayout *SetupDecFmtForDraw(D3D11VertexShader *vshader, const DecVtxFormat &decFmt, u32 pspFmt);
 
@@ -171,11 +161,11 @@ private:
 
 	struct InputLayoutKey {
 		D3D11VertexShader *vshader;
-		u32 vertType;
+		u32 decFmtId;
 		bool operator <(const InputLayoutKey &other) const {
-			if (vertType < other.vertType)
+			if (decFmtId < other.decFmtId)
 				return true;
-			if (vertType > other.vertType)
+			if (decFmtId > other.decFmtId)
 				return false;
 			return vshader < other.vshader;
 		}
@@ -192,11 +182,11 @@ private:
 	PushBufferD3D11 *pushVerts_;
 	PushBufferD3D11 *pushInds_;
 
-	// D3D11 state object caches
-	std::map<uint64_t, ID3D11BlendState *> blendCache_;
-	std::map<uint64_t, ID3D11BlendState1 *> blendCache1_;
-	std::map<uint64_t, ID3D11DepthStencilState *> depthStencilCache_;
-	std::map<uint32_t, ID3D11RasterizerState *> rasterCache_;
+	// D3D11 state object caches.
+	DenseHashMap<uint64_t, ID3D11BlendState *, nullptr> blendCache_;
+	DenseHashMap<uint64_t, ID3D11BlendState1 *, nullptr> blendCache1_;
+	DenseHashMap<uint64_t, ID3D11DepthStencilState *, nullptr> depthStencilCache_;
+	DenseHashMap<uint32_t, ID3D11RasterizerState *, nullptr> rasterCache_;
 
 	// Keep the depth state between ApplyDrawState and ApplyDrawStateLate
 	ID3D11RasterizerState *rasterState_ = nullptr;
@@ -213,27 +203,25 @@ private:
 	private:
 		ID3D11DeviceContext *context_;
 		ID3D11Device *device_;
-		ID3D11Texture1D *data_tex[3];
-		ID3D11ShaderResourceView *view[3];
-		D3D11_TEXTURE1D_DESC desc;
-		D3D11_BOX dstBox;
+		ID3D11Buffer *buf;
+		ID3D11ShaderResourceView *view;
+		D3D11_BUFFER_DESC desc;
 	public:
-		TessellationDataTransferD3D11(ID3D11DeviceContext *context_, ID3D11Device *device_)
-			: TessellationDataTransfer(), context_(context_), device_(device_), data_tex(), view(), desc(), dstBox{0, 0, 0, 1, 1, 1} {
-			desc.CPUAccessFlags = 0;
-			desc.Usage = D3D11_USAGE_DEFAULT;
-			desc.ArraySize = 1;
-			desc.MipLevels = 1;
+		TessellationDataTransferD3D11(ID3D11DeviceContext *context, ID3D11Device *device)
+			: TessellationDataTransfer(), context_(context), device_(device), buf(), view(), desc() {
+			desc.Usage = D3D11_USAGE_DYNAMIC;
 			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+			desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 		}
 		~TessellationDataTransferD3D11() {
-			for (int i = 0; i < 3; i++) {
-				if (data_tex[i]) {
-					data_tex[i]->Release();
-					view[i]->Release();
-				}
+			if (buf) {
+				buf->Release();
+				view->Release();
 			}
 		}
+
+		void PrepareBuffers(float *&pos, float *&tex, float *&col, int &posStride, int &texStride, int &colStride, int size, bool hasColor, bool hasTexCoords) override;
 		void SendDataToShader(const float *pos, const float *tex, const float *col, int size, bool hasColor, bool hasTexCoords) override;
 	};
 };

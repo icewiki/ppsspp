@@ -23,11 +23,18 @@
 
 namespace SaveState
 {
-	typedef std::function<void(bool status, const std::string &message, void *cbUserData)> Callback;
+	enum class Status {
+		FAILURE,
+		WARNING,
+		SUCCESS,
+	};
+	typedef std::function<void(Status status, const std::string &message, void *cbUserData)> Callback;
 
 	static const int NUM_SLOTS = 5;
 	static const char *STATE_EXTENSION = "ppst";
 	static const char *SCREENSHOT_EXTENSION = "jpg";
+	static const char *UNDO_STATE_EXTENSION = "undo.ppst";
+	static const char *UNDO_SCREENSHOT_EXTENSION = "undo.jpg";
 
 	void Init();
 	void Shutdown();
@@ -36,15 +43,18 @@ namespace SaveState
 	void NextSlot();
 	void SaveSlot(const std::string &gameFilename, int slot, Callback callback, void *cbUserData = 0);
 	void LoadSlot(const std::string &gameFilename, int slot, Callback callback, void *cbUserData = 0);
+	bool UndoSaveSlot(const std::string &gameFilename, int slot);
 	// Checks whether there's an existing save in the specified slot.
 	bool HasSaveInSlot(const std::string &gameFilename, int slot);
+	bool HasUndoSaveInSlot(const std::string &gameFilename, int slot);
 	bool HasScreenshotInSlot(const std::string &gameFilename, int slot);
 
 	int GetCurrentSlot();
 
-	// Returns -1 if there's no newest slot.
+	// Returns -1 if there's no oldest/newest slot.
 	int GetNewestSlot(const std::string &gameFilename);
-
+	int GetOldestSlot(const std::string &gameFilename);
+	
 	std::string GetSlotDateAsString(const std::string &gameFilename, int slot);
 	std::string GenerateSaveSlotFilename(const std::string &gameFilename, int slot, const char *extension);
 
@@ -74,6 +84,12 @@ namespace SaveState
 
 	// Returns true if a savestate has been used during this session.
 	bool HasLoadedState();
+
+	// Returns true if the state has been reused instead of real saves many times.
+	bool IsStale();
+
+	// Returns true if state is from an older PPSSPP version.
+	bool IsOldVersion();
 
 	// Check if there's any save stating needing to be done.  Normally called once per frame.
 	void Process();

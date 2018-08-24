@@ -27,7 +27,7 @@
 struct ShaderInfo {
 	std::string iniFile;  // which ini file was this definition in? So we can write settings back later
 	std::string section;  // ini file section. This is saved.
-	std::string name;     // Fancy display name. TODO: Not using yet.
+	std::string name;     // Fancy display name.
 
 	std::string fragmentShaderFile;
 	std::string vertexShaderFile;
@@ -36,6 +36,8 @@ struct ShaderInfo {
 	bool outputResolution;
 	// Use x1 rendering res + nearest screen scaling filter
 	bool isUpscalingFilter;
+	// Use 2x display resolution for supersampling with blurry shaders.
+	int SSAAFilterLevel;
 	// Force constant/max refresh for animated filters
 	bool requires60fps;
 

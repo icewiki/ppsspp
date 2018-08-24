@@ -2,38 +2,19 @@
 // Does not involve context creation etc, that should be handled separately - only does drawing.
 
 // The goals may change in the future though.
-// MIT licensed, by Henrik Rydgård 2014.
+// MIT licensed, by Henrik RydgÃ¥rd 2014.
 
 #pragma once
 
-#include <stdint.h>
+#include <cstdint>
 #include <cstddef>
 #include <vector>
 #include <string>
 
 #include "base/logging.h"
+#include "DataFormat.h"
 
 class Matrix4x4;
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-#include <d3dcommon.h>
-struct IDirect3DDevice9;
-struct IDirect3D9;
-struct IDirect3DDevice9Ex;
-struct IDirect3D9Ex;
-struct ID3D11Device;
-struct ID3D11DeviceContext;
-struct ID3D11Device1;
-struct ID3D11DeviceContext1;
-
-#endif
-
-class VulkanContext;
 
 namespace Draw {
 
@@ -176,68 +157,6 @@ enum class TextureType : uint8_t {
 	ARRAY2D,
 };
 
-enum class DataFormat : uint8_t {
-	UNDEFINED,
-
-	R8_UNORM,
-	R8G8_UNORM,
-	R8G8B8_UNORM,
-
-	R8G8B8A8_UNORM,
-	R8G8B8A8_UNORM_SRGB,
-	B8G8R8A8_UNORM,  // D3D style
-	B8G8R8A8_UNORM_SRGB,  // D3D style
-
-	R8G8B8A8_SNORM,
-	R8G8B8A8_UINT,
-	R8G8B8A8_SINT,
-
-	R4G4_UNORM_PACK8,
-	A4R4G4B4_UNORM_PACK16,  // A4 in the UPPER bit
-	B4G4R4A4_UNORM_PACK16,
-	R4G4B4A4_UNORM_PACK16,
-	R5G6B5_UNORM_PACK16,
-	B5G6R5_UNORM_PACK16,
-	R5G5B5A1_UNORM_PACK16, // A1 in the LOWER bit
-	B5G5R5A1_UNORM_PACK16, // A1 in the LOWER bit
-	A1R5G5B5_UNORM_PACK16, // A1 in the UPPER bit.
-
-	R16_FLOAT,
-	R16G16_FLOAT,
-	R16G16B16A16_FLOAT,
-
-	R32_FLOAT,
-	R32G32_FLOAT,
-	R32G32B32_FLOAT,
-	R32G32B32A32_FLOAT,
-
-	// Block compression formats.
-	// These are modern names for DXT and friends, now patent free.
-	// https://msdn.microsoft.com/en-us/library/bb694531.aspx
-	BC1_RGBA_UNORM_BLOCK,
-	BC1_RGBA_SRGB_BLOCK,
-	BC2_UNORM_BLOCK,  // 4-bit straight alpha + DXT1 color. Usually not worth using
-	BC2_SRGB_BLOCK,
-	BC3_UNORM_BLOCK,  // 3-bit alpha with 2 ref values (+ magic) + DXT1 color
-	BC3_SRGB_BLOCK,
-	BC4_UNORM_BLOCK,  // 1-channel, same storage as BC3 alpha
-	BC4_SNORM_BLOCK,
-	BC5_UNORM_BLOCK,  // 2-channel RG, each has same storage as BC3 alpha
-	BC5_SNORM_BLOCK,
-	BC6H_UFLOAT_BLOCK,  // TODO
-	BC6H_SFLOAT_BLOCK,
-	BC7_UNORM_BLOCK,    // Highly advanced, very expensive to compress, very good quality.
-	BC7_SRGB_BLOCK,
-
-	ETC1,
-
-	S8,
-	D16,
-	D24_S8,
-	D32F,
-	D32F_S8,
-};
-
 enum class ShaderStage {
 	VERTEX,
 	FRAGMENT,
@@ -311,6 +230,17 @@ enum InfoField {
 	DRIVER,
 };
 
+enum class GPUVendor {
+	VENDOR_UNKNOWN,
+	VENDOR_NVIDIA,
+	VENDOR_INTEL,
+	VENDOR_AMD,
+	VENDOR_ARM,  // Mali
+	VENDOR_QUALCOMM,
+	VENDOR_IMGTEC,  // PowerVR
+	VENDOR_BROADCOM,  // Raspberry
+};
+
 enum class NativeObject {
 	CONTEXT,
 	CONTEXT_EX,
@@ -322,9 +252,13 @@ enum class NativeObject {
 	BACKBUFFER_DEPTH_TEX,
 	FEATURE_LEVEL,
 	COMPATIBLE_RENDERPASS,
-	CURRENT_RENDERPASS,
-	RENDERPASS_COMMANDBUFFER,
-	BOUND_TEXTURE_IMAGEVIEW,
+	BACKBUFFER_RENDERPASS,
+	FRAMEBUFFER_RENDERPASS,
+	INIT_COMMANDBUFFER,
+	BOUND_TEXTURE0_IMAGEVIEW,
+	BOUND_TEXTURE1_IMAGEVIEW,
+	RENDER_MANAGER,
+	NULL_IMAGEVIEW,
 };
 
 enum FBColorDepth {
@@ -393,6 +327,7 @@ public:
 
 	void AddRef() { refcount_++; }
 	bool Release();
+	bool ReleaseAssertLast();
 
 private:
 	int refcount_;
@@ -541,6 +476,7 @@ struct PipelineDesc {
 };
 
 struct DeviceCaps {
+	GPUVendor vendor;
 	DataFormat preferredDepthBufferFormat;
 	DataFormat preferredShadowMapFormatLow;
 	DataFormat preferredShadowMapFormatHigh;
@@ -553,6 +489,9 @@ struct DeviceCaps {
 	bool logicOpSupported;
 	bool framebufferCopySupported;
 	bool framebufferBlitSupported;
+	bool framebufferDepthCopySupported;
+	bool framebufferDepthBlitSupported;
+	std::string deviceName;  // The device name to use when creating the thin3d context, to get the same one.
 };
 
 struct TextureDesc {
@@ -563,6 +502,9 @@ struct TextureDesc {
 	int depth;
 	int mipLevels;
 	bool generateMips;
+	// Optional, for tracking memory usage.
+	std::string tag;
+	// Does not take ownership over pointed-to data.
 	std::vector<uint8_t *> initData;
 };
 
@@ -575,6 +517,7 @@ enum class RPAction {
 struct RenderPassInfo {
 	RPAction color;
 	RPAction depth;
+	RPAction stencil;
 	uint32_t clearColor;
 	float clearDepth;
 	uint8_t clearStencil;
@@ -583,11 +526,14 @@ struct RenderPassInfo {
 class DrawContext {
 public:
 	virtual ~DrawContext();
+	bool CreatePresets();
+	void DestroyPresets();
 
 	virtual const DeviceCaps &GetDeviceCaps() const = 0;
 	virtual uint32_t GetDataFormatSupport(DataFormat fmt) const = 0;
 	virtual std::vector<std::string> GetFeatureList() const { return std::vector<std::string>(); }
 	virtual std::vector<std::string> GetExtensionList() const { return std::vector<std::string>(); }
+	virtual std::vector<std::string> GetDeviceList() const { return std::vector<std::string>(); }
 
 	virtual uint32_t GetSupportedShaderLanguages() const = 0;
 
@@ -605,6 +551,7 @@ public:
 
 	// Resources
 	virtual Buffer *CreateBuffer(size_t size, uint32_t usageFlags) = 0;
+	// Does not take ownership over pointed-to initData. After this returns, can dispose of it.
 	virtual Texture *CreateTexture(const TextureDesc &desc) = 0;
 	// On some hardware, you might get a 24-bit depth buffer even though you only wanted a 16-bit one.
 	virtual Framebuffer *CreateFramebuffer(const FramebufferDesc &desc) = 0;
@@ -620,6 +567,9 @@ public:
 	virtual bool CopyFramebufferToMemorySync(Framebuffer *src, int channelBits, int x, int y, int w, int h, Draw::DataFormat format, void *pixels, int pixelStride) {
 		return false;
 	}
+	virtual DataFormat PreferredFramebufferReadbackFormat(Framebuffer *src) {
+		return DataFormat::R8G8B8A8_UNORM;
+	}
 
 	// These functions should be self explanatory.
 	// Binding a zero render target means binding the backbuffer.
@@ -628,7 +578,10 @@ public:
 	// color must be 0, for now.
 	virtual void BindFramebufferAsTexture(Framebuffer *fbo, int binding, FBChannel channelBit, int attachment) = 0;
 
-	virtual uintptr_t GetFramebufferAPITexture(Framebuffer *fbo, int channelBits, int attachment) = 0;
+	// deprecated
+	virtual uintptr_t GetFramebufferAPITexture(Framebuffer *fbo, int channelBits, int attachment) {
+		return 0;
+	}
 
 	virtual void GetFramebufferDimensions(Framebuffer *fbo, int *w, int *h) = 0;
 
@@ -650,7 +603,8 @@ public:
 	virtual void UpdateDynamicUniformBuffer(const void *ub, size_t size) = 0;
 
 	void BindTexture(int stage, Texture *texture) {
-		BindTextures(stage, 1, &texture);
+		Texture *textures[1] = { texture };
+		BindTextures(stage, 1, textures);
 	}  // from sampler 0 and upwards
 
 	// Call this with 0 to signal that you have been drawing on your own, and need the state reset on the next pipeline bind.
@@ -664,19 +618,20 @@ public:
 	// Frame management (for the purposes of sync and resource management, necessary with modern APIs). Default implementations here.
 	virtual void BeginFrame() {}
 	virtual void EndFrame() {}
+	virtual void WipeQueue() {}
 
 	// This should be avoided as much as possible, in favor of clearing when binding a render target, which is native
 	// on Vulkan.
 	virtual void Clear(int mask, uint32_t colorval, float depthVal, int stencilVal) = 0;
 
 	// Necessary to correctly flip scissor rectangles etc for OpenGL.
-	void SetTargetSize(int w, int h) {
+	virtual void SetTargetSize(int w, int h) {
 		targetWidth_ = w;
 		targetHeight_ = h;
 	}
 
 	virtual std::string GetInfoString(InfoField info) const = 0;
-	virtual uintptr_t GetNativeObject(NativeObject obj) const = 0;
+	virtual uintptr_t GetNativeObject(NativeObject obj) = 0;
 
 	virtual void HandleEvent(Event ev, int width, int height, void *param1 = nullptr, void *param2 = nullptr) = 0;
 
@@ -691,8 +646,6 @@ public:
 	virtual void FlushState() {}
 
 protected:
-	void CreatePresets();
-
 	ShaderModule *vsPresets_[VS_MAX_PRESET];
 	ShaderModule *fsPresets_[FS_MAX_PRESET];
 
@@ -700,22 +653,7 @@ protected:
 	int targetHeight_;
 };
 
-size_t DataFormatSizeInBytes(DataFormat fmt);
-bool DataFormatIsDepthStencil(DataFormat fmt);
-inline bool DataFormatIsColor(DataFormat fmt) {
-	return !DataFormatIsDepthStencil(fmt);
-}
-
-DrawContext *T3DCreateGLContext();
-
 extern const UniformBufferDesc UBPresetDesc;
-
-#ifdef _WIN32
-DrawContext *T3DCreateDX9Context(IDirect3D9 *d3d, IDirect3D9Ex *d3dEx, int adapterId, IDirect3DDevice9 *device, IDirect3DDevice9Ex *deviceEx);
-DrawContext *T3DCreateD3D11Context(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Device1 *device1, ID3D11DeviceContext1 *context1, D3D_FEATURE_LEVEL featureLevel, HWND hWnd);
-#endif
-
-DrawContext *T3DCreateVulkanContext(VulkanContext *context);
 
 // UBs for the preset shaders
 

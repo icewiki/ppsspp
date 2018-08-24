@@ -37,7 +37,7 @@
 #include "GPU/Vulkan/ShaderManagerVulkan.h"
 
 static const char *vulkan_glsl_preamble =
-"#version 400\n"
+"#version 450\n"
 "#extension GL_ARB_separate_shader_objects : enable\n"
 "#extension GL_ARB_shading_language_420pack : enable\n\n";
 
@@ -97,7 +97,7 @@ enum DoLightComputation {
 // TODO: Skip all this if we can actually get a 16-bit depth buffer along with stencil, which
 // is a bit of a rare configuration, although quite common on mobile.
 
-bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *usesLighting) {
+bool GenerateVulkanGLSLVertexShader(const VShaderID &id, char *buffer) {
 	char *p = buffer;
 
 	WRITE(p, "%s", vulkan_glsl_preamble);
@@ -106,7 +106,7 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 	bool highpTexcoord = false;
 
 	bool isModeThrough = id.Bit(VS_BIT_IS_THROUGH);
-	bool lmode = id.Bit(VS_BIT_LMODE) && !isModeThrough;  // TODO: Different expression than in shaderIDgen
+	bool lmode = id.Bit(VS_BIT_LMODE);
 	bool doTexture = id.Bit(VS_BIT_DO_TEXTURE);
 	bool doTextureTransform = id.Bit(VS_BIT_DO_TEXTURE_TRANSFORM);
 
@@ -136,16 +136,12 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 	bool hasTexcoordTess = id.Bit(VS_BIT_HAS_TEXCOORD_TESS);
 	bool flipNormalTess = id.Bit(VS_BIT_NORM_REVERSE_TESS);
 
-	// The uniforms are passed in as three "clumps" that may or may not be present.
-	// We will memcpy the parts into place in a big buffer so we can be quite dynamic about what parts
-	// are present and what parts aren't, but we will not be ultra detailed about it.
-	*usesLighting = enableLighting || doShadeMapping;
 	WRITE(p, "\n");
-	WRITE(p, "layout (std140, set = 0, binding = 2) uniform baseVars {\n%s} base;\n", ub_baseStr);
+	WRITE(p, "layout (std140, set = 0, binding = 3) uniform baseVars {\n%s} base;\n", ub_baseStr);
 	if (enableLighting || doShadeMapping)
-		WRITE(p, "layout (std140, set = 0, binding = 3) uniform lightVars {\n%s} light;\n", ub_vs_lightsStr);
+		WRITE(p, "layout (std140, set = 0, binding = 4) uniform lightVars {\n%s} light;\n", ub_vs_lightsStr);
 	if (enableBones)
-		WRITE(p, "layout (std140, set = 0, binding = 4) uniform boneVars {\n%s} bone;\n", ub_vs_bonesStr);
+		WRITE(p, "layout (std140, set = 0, binding = 5) uniform boneVars {\n%s} bone;\n", ub_vs_bonesStr);
 
 	const char *shading = doFlatShading ? "flat " : "";
 
@@ -169,27 +165,27 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 	}
 
 	if (useHWTransform)
-		WRITE(p, "layout (location = %d) in vec3 position;\n", PspAttributeLocation::POSITION);
+		WRITE(p, "layout (location = %d) in vec3 position;\n", (int)PspAttributeLocation::POSITION);
 	else
 		// we pass the fog coord in w
-		WRITE(p, "layout (location = %d) in vec4 position;\n", PspAttributeLocation::POSITION);
+		WRITE(p, "layout (location = %d) in vec4 position;\n", (int)PspAttributeLocation::POSITION);
 
 	if (useHWTransform && hasNormal)
-		WRITE(p, "layout (location = %d) in vec3 normal;\n", PspAttributeLocation::NORMAL);
+		WRITE(p, "layout (location = %d) in vec3 normal;\n", (int)PspAttributeLocation::NORMAL);
 
 	bool texcoordInVec3 = false;
 	if (doTexture && hasTexcoord) {
 		if (!useHWTransform && doTextureTransform && !throughmode) {
-			WRITE(p, "layout (location = %d) in vec3 texcoord;\n", PspAttributeLocation::TEXCOORD);
+			WRITE(p, "layout (location = %d) in vec3 texcoord;\n", (int)PspAttributeLocation::TEXCOORD);
 			texcoordInVec3 = true;
 		}
 		else
-			WRITE(p, "layout (location = %d) in vec2 texcoord;\n", PspAttributeLocation::TEXCOORD);
+			WRITE(p, "layout (location = %d) in vec2 texcoord;\n", (int)PspAttributeLocation::TEXCOORD);
 	}
 	if (hasColor) {
-		WRITE(p, "layout (location = %d) in vec4 color0;\n", PspAttributeLocation::COLOR0);
+		WRITE(p, "layout (location = %d) in vec4 color0;\n", (int)PspAttributeLocation::COLOR0);
 		if (lmode && !useHWTransform)  // only software transform supplies color1 as vertex data
-			WRITE(p, "layout (location = %d) in vec3 color1;\n", PspAttributeLocation::COLOR1);
+			WRITE(p, "layout (location = %d) in vec3 color1;\n", (int)PspAttributeLocation::COLOR1);
 	}
 
 	WRITE(p, "layout (location = 1) %sout vec4 v_color0;\n", shading);
@@ -220,9 +216,14 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 	WRITE(p, "out gl_PerVertex { vec4 gl_Position; };\n");
 
 	if (doBezier || doSpline) {
-		WRITE(p, "layout (binding = 5) uniform sampler2D u_tess_pos_tex;\n");
-		WRITE(p, "layout (binding = 6) uniform sampler2D u_tess_tex_tex;\n");
-		WRITE(p, "layout (binding = 7) uniform sampler2D u_tess_col_tex;\n");
+		WRITE(p, "struct TessData {\n");
+		WRITE(p, "  vec4 pos;\n");
+		WRITE(p, "  vec4 uv;\n");
+		WRITE(p, "  vec4 color;\n");
+		WRITE(p, "};");
+		WRITE(p, "layout (std430, set = 0, binding = 6) buffer s_tess_data {\n");
+		WRITE(p, "  TessData data[];");
+		WRITE(p, "} tess_data;\n");
 
 		for (int i = 2; i <= 4; i++) {
 			// Define 3 types vec2, vec3, vec4
@@ -333,19 +334,20 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 				WRITE(p, "  vec3 _pos[16];\n");
 				WRITE(p, "  vec2 _tex[16];\n");
 				WRITE(p, "  vec4 _col[16];\n");
-				WRITE(p, "  int num_patches_u = %s;\n", doBezier ? "(base.spline_count_u - 1) / 3" : "base.spline_count_u - 3");
+				WRITE(p, "  int spline_count_u = int(base.spline_counts & 0xff);\n");
+				WRITE(p, "  int spline_count_v = int((base.spline_counts >> 8) & 0xff);\n");
+				WRITE(p, "  int num_patches_u = %s;\n", doBezier ? "(spline_count_u - 1) / 3" : "spline_count_u - 3");
 				WRITE(p, "  int u = int(mod(gl_InstanceIndex, num_patches_u));\n");
 				WRITE(p, "  int v = gl_InstanceIndex / num_patches_u;\n");
 				WRITE(p, "  ivec2 patch_pos = ivec2(u, v);\n");
 				WRITE(p, "  for (int i = 0; i < 4; i++) {\n");
 				WRITE(p, "    for (int j = 0; j < 4; j++) {\n");
-				WRITE(p, "      int idx = (i + v%s) * base.spline_count_u + (j + u%s);\n", doBezier ? " * 3" : "", doBezier ? " * 3" : "");
-				WRITE(p, "      ivec2 index = ivec2(idx, 0);\n");
-				WRITE(p, "      _pos[i * 4 + j] = texelFetch(u_tess_pos_tex, index, 0).xyz;\n");
+				WRITE(p, "      int idx = (i + v%s) * spline_count_u + (j + u%s);\n", doBezier ? " * 3" : "", doBezier ? " * 3" : "");
+				WRITE(p, "      _pos[i * 4 + j] = tess_data.data[idx].pos.xyz;\n");
 				if (doTexture && hasTexcoord && hasTexcoordTess)
-					WRITE(p, "      _tex[i * 4 + j] = texelFetch(u_tess_tex_tex, index, 0).xy;\n");
+					WRITE(p, "      _tex[i * 4 + j] = tess_data.data[idx].uv.xy;\n");
 				if (hasColor && hasColorTess)
-					WRITE(p, "      _col[i * 4 + j] = texelFetch(u_tess_col_tex, index, 0).rgba;\n");
+					WRITE(p, "      _col[i * 4 + j] = tess_data.data[idx].color;\n");
 				WRITE(p, "    }\n");
 				WRITE(p, "  }\n");
 				WRITE(p, "  vec2 tess_pos = position.xy;\n");
@@ -357,8 +359,10 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 					WRITE(p, "  weights[2] = 3 * tess_pos * tess_pos * (1 - tess_pos);\n");
 					WRITE(p, "  weights[3] = tess_pos * tess_pos * tess_pos;\n");
 				} else { // Spline
-					WRITE(p, "  ivec2 spline_num_patches = ivec2(base.spline_count_u - 3, base.spline_count_v - 3);\n");
-					WRITE(p, "  ivec2 spline_type = ivec2(base.spline_type_u, base.spline_type_v);\n");
+					WRITE(p, "  ivec2 spline_num_patches = ivec2(spline_count_u - 3, spline_count_v - 3);\n");
+					WRITE(p, "  int spline_type_u = int((base.spline_counts >> 16) & 0xff);\n");
+					WRITE(p, "  int spline_type_v = int((base.spline_counts >> 24) & 0xff);\n");
+					WRITE(p, "  ivec2 spline_type = ivec2(spline_type_u, spline_type_v);\n");
 					WRITE(p, "  vec2 knots[6];\n");
 					WRITE(p, "  spline_knot(spline_num_patches, spline_type, knots, patch_pos);\n");
 					WRITE(p, "  spline_weight(tess_pos + patch_pos, knots, weights);\n");
@@ -374,7 +378,7 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 					if (hasColorTess)
 						WRITE(p, "  vec4 col = tess_sample(_col, weights);\n");
 					else
-						WRITE(p, "  vec4 col = texelFetch(u_tess_col_tex, ivec2(0, 0), 0).rgba;\n");
+						WRITE(p, "  vec4 col = tess_data.data[0].color;\n");
 				}
 				if (hasNormal) {
 					// Curved surface is probably always need to compute normal(not sampling from control points)
@@ -562,8 +566,8 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 			case GE_LIGHTTYPE_SPOT:
 			case GE_LIGHTTYPE_UNKNOWN:
 				WRITE(p, "  float angle%i = dot(normalize(light.dir[%i]), toLight);\n", i, i);
-				WRITE(p, "  if (angle%i >= light.angle[%i]) {\n", i, i);
-				WRITE(p, "    lightScale = clamp(1.0 / dot(light.att[%i], vec3(1.0, distance, distance*distance)), 0.0, 1.0) * pow(angle%i, light.spotCoef[%i]);\n", i, i, i);
+				WRITE(p, "  if (angle%i >= light.angle_spotCoef[%i].x) {\n", i, i);
+				WRITE(p, "    lightScale = clamp(1.0 / dot(light.att[%i], vec3(1.0, distance, distance*distance)), 0.0, 1.0) * pow(angle%i, light.angle_spotCoef[%i].y);\n", i, i, i);
 				WRITE(p, "  } else {\n");
 				WRITE(p, "    lightScale = 0.0;\n");
 				WRITE(p, "  }\n");
@@ -626,7 +630,7 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 						if (doBezier || doSpline)
 							WRITE(p, "  v_texcoord = vec3(tex.xy * base.uvscaleoffset.xy + base.uvscaleoffset.zw, 0.0);\n");
 						else
-							WRITE(p, "  v_texcoord = vec3(texcoord.xy, 0.0);\n");
+							WRITE(p, "  v_texcoord = vec3(texcoord.xy * base.uvscaleoffset.xy, 0.0);\n");
 					} else {
 						WRITE(p, "  v_texcoord = vec3(0.0);\n");
 					}
@@ -689,7 +693,7 @@ bool GenerateVulkanGLSLVertexShader(const ShaderID &id, char *buffer, bool *uses
 
 		// Compute fogdepth
 		if (enableFog)
-			WRITE(p, "  v_fogdepth = (viewPos.z + base.fogcoef_stencilreplace.x) * base.fogcoef_stencilreplace.y;\n");
+			WRITE(p, "  v_fogdepth = (viewPos.z + base.fogcoef.x) * base.fogcoef.y;\n");
 	}
 	WRITE(p, "}\n");
 	return true;

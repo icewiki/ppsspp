@@ -26,6 +26,8 @@ class NullGPU : public GPUCommon {
 public:
 	NullGPU();
 	~NullGPU();
+
+	void CheckGPUFeatures() override {}
 	void InitClear() override {}
 	void ExecuteOp(u32 op, u32 diff) override;
 
@@ -40,6 +42,7 @@ public:
 	bool PerformMemoryUpload(u32 dest, int size) override;
 	bool PerformStencilUpload(u32 dest, int size) override;
 	void ClearCacheNextFrame() override {}
+	bool FramebufferDirty() override { return true; }
 
 	void DeviceLost() override {}
 	void DeviceRestore() override {}

@@ -29,6 +29,7 @@
 // + Sections can be versioned for backwards/forwards compatibility
 // - Serialization code for anything complex has to be manually written.
 
+#include <cstdlib>
 #include <map>
 #include <unordered_map>
 #include <deque>
@@ -621,7 +622,7 @@ public:
 
 	// Load file template
 	template<class T>
-	static Error Load(const std::string &filename, const char *gitVersion, T& _class, std::string *failureReason)
+	static Error Load(const std::string &filename, std::string *gitVersion, T& _class, std::string *failureReason)
 	{
 		*failureReason = "LoadStateWrongVersion";
 
@@ -646,17 +647,9 @@ public:
 	{
 		// Get data
 		size_t const sz = MeasurePtr(_class);
-		u8 *buffer = nullptr;
-#if PPSSPP_PLATFORM(ANDROID)
-		buffer = new u8[sz];
-#else
-		try {
-			buffer = new u8[sz];
-		}
-		catch (std::bad_alloc e) {
+		u8 *buffer = (u8 *)malloc(sz);
+		if (!buffer)
 			return ERROR_BAD_ALLOC;
-		}
-#endif
 		Error error = SavePtr(buffer, _class);
 
 		// SaveFile takes ownership of buffer
@@ -707,7 +700,7 @@ private:
 		REVISION_CURRENT = REVISION_TITLE,
 	};
 
-	static Error LoadFile(const std::string &filename, const char *gitVersion, u8 *&buffer, size_t &sz, std::string *failureReason);
+	static Error LoadFile(const std::string &filename, std::string *gitVersion, u8 *&buffer, size_t &sz, std::string *failureReason);
 	static Error SaveFile(const std::string &filename, const std::string &title, const char *gitVersion, u8 *buffer, size_t sz);
 	static Error LoadFileHeader(File::IOFile &pFile, SChunkHeader &header, std::string *title);
 };

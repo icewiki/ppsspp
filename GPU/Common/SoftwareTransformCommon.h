@@ -44,7 +44,9 @@ struct SoftwareTransformParams {
 	TransformedVertex *transformedExpanded;
 	FramebufferManagerCommon *fbman;
 	TextureCacheCommon *texCache;
+	bool allowClear;
 	bool allowSeparateAlphaClear;
+	bool provokeFlatFirst;
 };
 
 void SoftwareTransform(int prim, int vertexCount, u32 vertexType, u16 *&inds, int indexType, const DecVtxFormat &decVtxFormat, int &maxIndex, TransformedVertex *&drawBuffer,

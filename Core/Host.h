@@ -50,8 +50,6 @@ public:
 	virtual void SaveSymbolMap() {}
 	virtual void SetWindowTitle(const char *message) {}
 
-	virtual void SendCoreWait(bool) {}
-
 	// While debugging is active, it's perfectly fine for these to block.
 	virtual bool GPUDebuggingActive() { return false; }
 	virtual void GPUNotifyCommand(u32 pc) {}
@@ -63,6 +61,7 @@ public:
 	virtual bool CreateDesktopShortcut(std::string argumentPath, std::string title) {return false;}
 
 	virtual void NotifyUserMessage(const std::string &message, float duration = 1.0f, u32 color = 0x00FFFFFF, const char *id = nullptr) {}
+	virtual void SendUIMessage(const std::string &message, const std::string &value) {}
 
 	// Used for headless.
 	virtual bool ShouldSkipUI() { return false; }

@@ -1,6 +1,7 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "PPSSPP_UWPMain.h"
 
+#include <cassert>
 #include <mutex>
 
 #include "base/basictypes.h"
@@ -19,6 +20,7 @@
 #include "net/resolve.h"
 #include "base/display.h"
 #include "thread/threadutil.h"
+#include "thin3d/thin3d_create.h"
 #include "util/text/utf8.h"
 #include "Common/DirectXHelper.h"
 #include "NKCodeFromWindowsSystem.h"
@@ -107,8 +109,7 @@ PPSSPP_UWPMain::PPSSPP_UWPMain(App ^app, const std::shared_ptr<DX::DeviceResourc
 
 	bool debugLogLevel = false;
 
-	g_Config.iGPUBackend = GPU_BACKEND_DIRECT3D11;
-	g_Config.bSeparateCPUThread = false;
+	g_Config.iGPUBackend = (int)GPUBackend::DIRECT3D11;
 
 	if (debugLogLevel) {
 		LogManager::GetInstance()->SetAllLogLevels(LogTypes::LDEBUG);
@@ -323,6 +324,8 @@ void PPSSPP_UWPMain::LoadStorageFile(StorageFile ^file) {
 UWPGraphicsContext::UWPGraphicsContext(std::shared_ptr<DX::DeviceResources> resources) {
 	draw_ = Draw::T3DCreateD3D11Context(
 		resources->GetD3DDevice(), resources->GetD3DDeviceContext(), resources->GetD3DDevice(), resources->GetD3DDeviceContext(), resources->GetDeviceFeatureLevel(), 0);
+	bool success = draw_->CreatePresets();
+	assert(success);
 }
 
 void UWPGraphicsContext::Shutdown() {

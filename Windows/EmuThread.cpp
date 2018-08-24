@@ -1,4 +1,6 @@
 #include <mutex>
+#include <atomic>
+#include <thread>
 
 #include "base/timeutil.h"
 #include "base/NativeApp.h"
@@ -8,6 +10,7 @@
 
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
+#include "Common/GraphicsContext.h"
 #include "Windows/EmuThread.h"
 #include "Windows/W32Util/Misc.h"
 #include "Windows/MainWindow.h"
@@ -19,107 +22,127 @@
 #include "Core/Host.h"
 #include "Core/System.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "thread/threadutil.h"
 
-#include <tchar.h>
-#include <process.h>
-#include <intrin.h>
+enum class EmuThreadState {
+	DISABLED,
+	START_REQUESTED,
+	RUNNING,
+	QUIT_REQUESTED,
+	STOPPED,
+};
 
-#pragma intrinsic(_InterlockedExchange)
+static std::thread emuThread;
+static std::atomic<int> emuThreadState((int)EmuThreadState::DISABLED);
 
-static std::mutex emuThreadLock;
-static HANDLE emuThread;
-static volatile long emuThreadReady;
+static std::thread mainThread;
+static bool useEmuThread;
+static std::string g_error_message;
+static bool g_inLoop;
 
 extern std::vector<std::wstring> GetWideCmdLine();
 
-enum EmuThreadStatus : long
-{
-	THREAD_NONE = 0,
-	THREAD_INIT,
-	THREAD_CORE_LOOP,
-	THREAD_SHUTDOWN,
-	THREAD_END,
-};
+class GraphicsContext;
+static GraphicsContext *g_graphicsContext;
 
-HANDLE EmuThread_GetThreadHandle()
-{
-	std::lock_guard<std::mutex> guard(emuThreadLock);
-	return emuThread;
+void MainThreadFunc();
+
+// On most other platforms, we let the "main" thread become the render thread and
+// start a separate emu thread from that, if needed. Should probably switch to that
+// to make it the same on all platforms.
+void MainThread_Start(bool separateEmuThread) {
+	useEmuThread = separateEmuThread;
+	mainThread = std::thread(&MainThreadFunc);
 }
 
-unsigned int WINAPI TheThread(void *);
-
-void EmuThread_Start()
-{
-	std::lock_guard<std::mutex> guard(emuThreadLock);
-	emuThread = (HANDLE)_beginthreadex(0, 0, &TheThread, 0, 0, 0);
-}
-
-void EmuThread_Stop()
-{
+void MainThread_Stop() {
 	// Already stopped?
-	{
-		std::lock_guard<std::mutex> guard(emuThreadLock);
-		if (emuThread == NULL || emuThreadReady == THREAD_END)
-			return;
-	}
-
 	UpdateUIState(UISTATE_EXIT);
 	Core_Stop();
-	Core_WaitInactive(800);
-	if (WAIT_TIMEOUT == WaitForSingleObject(emuThread, 800))
-	{
-		_dbg_assert_msg_(COMMON, false, "Wait for EmuThread timed out.");
-	}
-	{
-		std::lock_guard<std::mutex> guard(emuThreadLock);
-		CloseHandle(emuThread);
-		emuThread = 0;
-	}
-	PostMessage(MainWindow::GetHWND(), MainWindow::WM_USER_UPDATE_UI, 0, 0);
+	mainThread.join();
 }
 
-bool EmuThread_Ready()
-{
-	return emuThreadReady == THREAD_CORE_LOOP;
+bool MainThread_Ready() {
+	return g_inLoop;
 }
 
-unsigned int WINAPI TheThread(void *)
-{
-	_InterlockedExchange(&emuThreadReady, THREAD_INIT);
+static void EmuThreadFunc(GraphicsContext *graphicsContext) {
+	setCurrentThreadName("Emu");
 
-	setCurrentThreadName("Emu");  // And graphics...
+	// There's no real requirement that NativeInit happen on this thread.
+	// We just call the update/render loop here.
+	emuThreadState = (int)EmuThreadState::RUNNING;
+
+	NativeInitGraphics(graphicsContext);
+
+	while (emuThreadState != (int)EmuThreadState::QUIT_REQUESTED) {
+		// We're here again, so the game quit.  Restart Core_Run() which controls the UI.
+		// This way they can load a new game.
+		if (!Core_IsActive())
+			UpdateUIState(UISTATE_MENU);
+		Core_Run(g_graphicsContext);
+	}
+
+	emuThreadState = (int)EmuThreadState::STOPPED;
+
+	NativeShutdownGraphics();
+
+	// Ask the main thread to stop.  This prevents a hang on a race condition.
+	graphicsContext->StopThread();
+}
+
+static void EmuThreadStart(GraphicsContext *graphicsContext) {
+	emuThreadState = (int)EmuThreadState::START_REQUESTED;
+	emuThread = std::thread(&EmuThreadFunc, graphicsContext);
+}
+
+static void EmuThreadStop() {
+	emuThreadState = (int)EmuThreadState::QUIT_REQUESTED;
+}
+
+static void EmuThreadJoin() {
+	emuThread.join();
+	emuThread = std::thread();
+	ILOG("EmuThreadJoin - joined");
+}
+
+void MainThreadFunc() {
+	if (useEmuThread) {
+		// We'll start up a separate thread we'll call Emu
+		setCurrentThreadName("Render");
+	} else {
+		// This is both Emu and Render.
+		setCurrentThreadName("Emu");
+	}
 
 	host = new WindowsHost(MainWindow::GetHInstance(), MainWindow::GetHWND(), MainWindow::GetDisplayHWND());
 	host->SetWindowTitle(nullptr);
 
-	// Convert the command-line arguments to Unicode, then to proper UTF-8 
-	// (the benefit being that we don't have to pollute the UI project with win32 ifdefs and lots of Convert<whatever>To<whatever>).
-	// This avoids issues with PPSSPP inadvertently destroying paths with Unicode glyphs 
-	// (using the ANSI args resulted in Japanese/Chinese glyphs being turned into question marks, at least for me..).
-	// -TheDax
+	// We convert command line arguments to UTF-8 immediately.
 	std::vector<std::wstring> wideArgs = GetWideCmdLine();
 	std::vector<std::string> argsUTF8;
 	for (auto& string : wideArgs) {
 		argsUTF8.push_back(ConvertWStringToUTF8(string));
 	}
-
 	std::vector<const char *> args;
-
 	for (auto& string : argsUTF8) {
 		args.push_back(string.c_str());
 	}
-
 	bool performingRestart = NativeIsRestarting();
 	NativeInit(static_cast<int>(args.size()), &args[0], "1234", "1234", nullptr);
 
 	host->UpdateUI();
 
-	GraphicsContext *graphicsContext = nullptr;
-
 	std::string error_string;
-	if (!host->InitGraphics(&error_string, &graphicsContext)) {
+	bool success = host->InitGraphics(&error_string, &g_graphicsContext);
+
+	if (success) {
+		// Main thread is the render thread.
+		success = g_graphicsContext->InitFromRenderThread(&error_string);
+	}
+
+	if (!success) {
 		// Before anything: are we restarting right now?
 		if (performingRestart) {
 			// Okay, switching graphics didn't work out.  Probably a driver bug - fallback to restart.
@@ -135,19 +158,19 @@ unsigned int WINAPI TheThread(void *)
 		const char *defaultErrorOpenGL = "Failed initializing graphics. Try upgrading your graphics drivers.\n\nWould you like to try switching to DirectX 9?\n\nError message:";
 		const char *defaultErrorDirect3D9 = "Failed initializing graphics. Try upgrading your graphics drivers and directx 9 runtime.\n\nWould you like to try switching to OpenGL?\n\nError message:";
 		const char *genericError;
-		int nextBackend = GPU_BACKEND_DIRECT3D9;
+		GPUBackend nextBackend = GPUBackend::DIRECT3D9;
 		switch (g_Config.iGPUBackend) {
-		case GPU_BACKEND_DIRECT3D9:
-			nextBackend = GPU_BACKEND_OPENGL;
+		case (int)GPUBackend::DIRECT3D9:
+			nextBackend = GPUBackend::OPENGL;
 			genericError = err->T("GenericDirect3D9Error", defaultErrorDirect3D9);
 			break;
-		case GPU_BACKEND_VULKAN:
-			nextBackend = GPU_BACKEND_OPENGL;
+		case (int)GPUBackend::VULKAN:
+			nextBackend = GPUBackend::OPENGL;
 			genericError = err->T("GenericVulkanError", defaultErrorVulkan);
 			break;
-		case GPU_BACKEND_OPENGL:
+		case (int)GPUBackend::OPENGL:
 		default:
-			nextBackend = GPU_BACKEND_DIRECT3D9;
+			nextBackend = GPUBackend::DIRECT3D9;
 			genericError = err->T("GenericOpenGLError", defaultErrorOpenGL);
 			break;
 		}
@@ -158,18 +181,27 @@ unsigned int WINAPI TheThread(void *)
 
 		if (yes) {
 			// Change the config to the alternative and restart.
-			g_Config.iGPUBackend = nextBackend;
+			g_Config.iGPUBackend = (int)nextBackend;
 			g_Config.Save();
 
 			W32Util::ExitAndRestart();
+		} else {
+			if (g_Config.iGPUBackend == (int)GPUBackend::DIRECT3D9) {
+				// Allow the user to download the DX9 runtime.
+				LaunchBrowser("https://www.microsoft.com/en-us/download/details.aspx?id=34429");
+			}
 		}
 
 		// No safe way out without graphics.
 		ExitProcess(1);
 	}
 
-	NativeInitGraphics(graphicsContext);
-	NativeResized();
+	GraphicsContext *graphicsContext = g_graphicsContext;
+
+	if (!useEmuThread) {
+		NativeInitGraphics(graphicsContext);
+		NativeResized();
+	}
 
 	INFO_LOG(BOOT, "Done.");
 	_dbg_update_();
@@ -179,34 +211,63 @@ unsigned int WINAPI TheThread(void *)
 		goto shutdown;
 	}
 
-	_InterlockedExchange(&emuThreadReady, THREAD_CORE_LOOP);
+	g_inLoop = true;
+
+	if (useEmuThread) {
+		EmuThreadStart(graphicsContext);
+	}
+	graphicsContext->ThreadStart();
 
 	if (g_Config.bBrowse)
 		PostMessage(MainWindow::GetHWND(), WM_COMMAND, ID_FILE_LOAD, 0);
 
-	Core_EnableStepping(FALSE);
+	Core_EnableStepping(false);
 
-	while (GetUIState() != UISTATE_EXIT)
-	{
-		// We're here again, so the game quit.  Restart Core_Run() which controls the UI.
-		// This way they can load a new game.
-		if (!Core_IsActive())
-			UpdateUIState(UISTATE_MENU);
+	if (useEmuThread) {
+		while (emuThreadState != (int)EmuThreadState::DISABLED) {
+			graphicsContext->ThreadFrame();
+			if (GetUIState() == UISTATE_EXIT) {
+				break;
+			}
+		}
+	} else {
+		while (GetUIState() != UISTATE_EXIT) {
+			// We're here again, so the game quit.  Restart Core_Run() which controls the UI.
+			// This way they can load a new game.
+			if (!Core_IsActive())
+				UpdateUIState(UISTATE_MENU);
+			Core_Run(g_graphicsContext);
+		}
+	}
+	Core_Stop();
+	if (!useEmuThread) {
+		// Process the shutdown.  Without this, non-GL delays 800ms on shutdown.
+		Core_Run(g_graphicsContext);
+	}
+	Core_WaitInactive(800);
 
-		Core_Run(graphicsContext);
+	g_inLoop = false;
+
+	if (useEmuThread) {
+		EmuThreadStop();
+		while (graphicsContext->ThreadFrame()) {
+			// Need to keep eating frames to allow the EmuThread to exit correctly.
+			continue;
+		}
+		EmuThreadJoin();
 	}
 
 shutdown:
-	_InterlockedExchange(&emuThreadReady, THREAD_SHUTDOWN);
 
-	NativeShutdownGraphics();
+	if (!useEmuThread) {
+		NativeShutdownGraphics();
+	}
+
+	g_graphicsContext->ThreadEnd();
+	g_graphicsContext->ShutdownFromRenderThread();
 
 	// NativeShutdown deletes the graphics context through host->ShutdownGraphics().
 	NativeShutdown();
-	
-	_InterlockedExchange(&emuThreadReady, THREAD_END);
 
-	return 0;
+	PostMessage(MainWindow::GetHWND(), MainWindow::WM_USER_UPDATE_UI, 0, 0);
 }
-
-

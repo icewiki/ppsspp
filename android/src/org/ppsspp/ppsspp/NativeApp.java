@@ -1,17 +1,16 @@
 package org.ppsspp.ppsspp;
 
-
 // Note that the display* methods are in NativeRenderer.java
 
 public class NativeApp {
-	public final static int DEVICE_ID_DEFAULT = 0;
-	public final static int DEVICE_ID_KEYBOARD = 1;
-	public final static int DEVICE_ID_MOUSE = 2;
-	public final static int DEVICE_ID_PAD_0 = 10;
+	public static final int DEVICE_ID_DEFAULT = 0;
+	public static final int DEVICE_ID_KEYBOARD = 1;
+	public static final int DEVICE_ID_MOUSE = 2;
+	public static final int DEVICE_ID_PAD_0 = 10;
 
-	public final static int DEVICE_TYPE_MOBILE = 0;
-	public final static int DEVICE_TYPE_TV = 1;
-	public final static int DEVICE_TYPE_DESKTOP = 2;
+	public static final int DEVICE_TYPE_MOBILE = 0;
+	public static final int DEVICE_TYPE_TV = 1;
+	public static final int DEVICE_TYPE_DESKTOP = 2;
 
 	public static native void init(String model, int deviceType, String languageRegion, String apkPath, String dataDir, String externalDir, String libraryDir, String cacheDir, String shortcutParam, int androidVersion, String board);
 	public static native void audioInit();
@@ -32,7 +31,6 @@ public class NativeApp {
 	public static native void pause();
 	public static native void resume();
 
-	// There's not really any reason to ever call shutdown as we can recover from a killed activity.
 	public static native void shutdown();
 
 	public static native boolean keyDown(int deviceId, int key, boolean isRepeat);
@@ -57,4 +55,3 @@ public class NativeApp {
 
 	public static native void pushCameraImage(byte[] image);
 }
-
